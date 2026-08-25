@@ -1,0 +1,66 @@
+# Per-muscle-group motor mapping and control parameters.
+# motor_id:         lerobot SO-101 motor id driven by this muscle
+#                    (1 shoulder_pan, 2 shoulder_lift, 3 elbow_flex,
+#                     4 wrist_flex, 5 wrist_roll, 6 gripper)
+# rotation_rate:     angular speed (rad/s) applied while the muscle is
+#                    activated; negative rotates the motor the opposite
+#                    direction (used for the antagonist half of a pair)
+# activation_level:  activation threshold, as a fraction of the muscle's
+#                    own peak RMS amplitude (0-1)
+# starting_angle:    motor angle (deg) at rest, before any activation
+# angle_min:         motor's minimum reachable angle (deg)
+# angle_max:         motor's maximum reachable angle (deg)
+#
+# starting_angle/angle_min/angle_max are taken from that motor's observed
+# range in data/latency_data.csv. A flexion/extension pair shares the same
+# motor, so both halves of a pair carry identical range/starting values —
+# only rotation_rate's sign differs between them.
+
+muscles:
+  shoulder:
+    motor_id: 1
+    rotation_rate: 0.1
+    activation_level: 0.5
+    starting_angle: -54.16
+    angle_min: -54.16
+    angle_max: -1.80
+
+  elbow_flexion:
+    motor_id: 3
+    rotation_rate: 0.3
+    activation_level: 0.5
+    starting_angle: 36.61
+    angle_min: -26.24
+    angle_max: 99.46
+
+  elbow_extension:
+    motor_id: 3
+    rotation_rate: -0.3
+    activation_level: 0.5
+    starting_angle: 36.61
+    angle_min: -26.24
+    angle_max: 99.46
+
+  wrist_flexion:
+    motor_id: 4
+    rotation_rate: 0.3
+    activation_level: 0.5
+    starting_angle: -73.65
+    angle_min: -99.56
+    angle_max: -47.74
+
+  wrist_extension:
+    motor_id: 4
+    rotation_rate: -0.3
+    activation_level: 0.5
+    starting_angle: -73.65
+    angle_min: -99.56
+    angle_max: -47.74
+
+  grip:
+    motor_id: 6
+    rotation_rate: 0.3
+    activation_level: 0.5
+    starting_angle: 0.07
+    angle_min: 0.07
+    angle_max: 29.22

@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -)",
+      "Bash(pip3 list *)",
+      "Bash(conda env *)",
+      "Bash(/home/stemsci/miniconda3/envs/lerobot/bin/python3 -c \"import numpy, pandas, matplotlib; print\\('ok', numpy.__version__, pandas.__version__, matplotlib.__version__\\)\")",
+      "Bash(/home/stemsci/miniconda3/envs/lerobot/bin/python3 -c ' *)",
+      "Bash(MPLBACKEND=Agg /home/stemsci/miniconda3/envs/lerobot/bin/python3 graph_emg.py)",
+      "Bash(MPLBACKEND=Agg /home/stemsci/miniconda3/envs/lerobot/bin/python3 graph_emg_single.py \"emg_data/shoulder/max shoulder pitch data.csv\")",
+      "Bash(/home/stemsci/miniconda3/envs/lerobot/bin/python3 -)",
+      "Bash(MPLBACKEND=Agg /home/stemsci/miniconda3/envs/lerobot/bin/python3 graph_emg_motor_theta.py)",
+      "Bash(MPLBACKEND=Agg /home/stemsci/miniconda3/envs/lerobot/bin/python3 graph_emg_person_theta.py)",
+      "Bash(python graph_emg_motor_theta.py)",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(kill -9 %1)",
+      "Bash(pkill -f \"graph_emg_motor_theta.py\")",
+      "Bash(/home/stemsci/miniconda3/envs/lerobot/bin/python graph_emg_motor_theta.py)",
+      "Bash(/home/stemsci/miniconda3/envs/lerobot/bin/python graph_emg_max_theta.py)",
+      "Bash(python3 -c \"import lerobot; print\\(lerobot.__file__\\)\")",
+      "Bash(pip show *)",
+      "Bash(python3 -c \"import pynput; print\\(pynput.__file__\\)\")",
+      "Bash(python3 -m py_compile /home/stemsci/capstone_project/main.py)",
+      "Bash(set -e)",
+      "Bash(python3 -m py_compile scripts/collect_teleop_data.py scripts/plot_teleop_latency.py scripts/plot_emg.py scripts/plot_emg_single.py scripts/plot_emg_motor_theta.py scripts/plot_emg_person_theta.py scripts/plot_emg_max_theta.py main.py)",
+      "Bash(echo \"compile: $?\")",
+      "Bash(python3 -c \"import matplotlib, numpy, pandas, yaml; print\\('deps ok'\\)\")",
+      "Read(//home/stemsci/**)",
+      "Bash(pyenv versions *)",
+      "Bash(timeout 5 curl -sI https://pypi.org)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(timeout 10 curl -s \"https://api.github.com/repos/TheRobotStudio/SO-ARM100/contents/Simulation/SO101\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(x['name'], x['type'], x.get\\('size'\\)\\) for x in d]\")",
+      "Bash(timeout 10 curl -s \"https://api.github.com/repos/TheRobotStudio/SO-ARM100/contents/Simulation/SO101/assets\")",
+      "Bash(python3 -c ' *)",
+      "Bash(timeout 10 curl -s \"https://api.github.com/repos/TheRobotStudio/SO-ARM100\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('license'\\)\\)\")",
+      "Bash(timeout 10 curl -s \"https://api.github.com/repos/TheRobotStudio/SO-ARM100/contents/\")",
+      "Bash(timeout 10 curl -s \"https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/main/LICENSE\" -o /home/stemsci/capstone_project/robot_model/LICENSE)"
+    ]
+  }
+}

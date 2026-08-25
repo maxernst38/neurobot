@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Arm Motion Tracker</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Arm Motion Tracker <span class="tag">test app</span></h1>
+    <p class="subtitle">
+      Webcam pose/hand tracking (MediaPipe) &rarr; predicted shoulder / elbow / wrist / grip motion.
+    </p>
+  </header>
+
+  <div class="toolbar">
+    <button id="startBtn">Start camera</button>
+    <label class="side-toggle">
+      Track side:
+      <select id="sideSelect">
+        <option value="RIGHT" selected>Right arm</option>
+        <option value="LEFT">Left arm</option>
+      </select>
+    </label>
+    <span id="status" class="status">Idle</span>
+  </div>
+
+  <main>
+    <div class="video-pane">
+      <div class="video-wrap">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div id="primary" class="primary-banner">No motion detected</div>
+      <div id="metrics" class="metrics"></div>
+      <p class="note">
+        Angles are geometric estimates from 2D+depth landmarks, smoothed and
+        thresholded frame-to-frame &mdash; shoulder/wrist rotation are rough
+        proxies, not IMU-grade measurements.
+      </p>
+
+      <div class="robot-link">
+        <div class="robot-link-head">Robot link</div>
+        <div class="robot-link-row">
+          <input id="robotHost" type="text" placeholder="host:port" />
+          <label class="robot-toggle">
+            <input id="robotEnable" type="checkbox" />
+            Send to robot
+          </label>
+        </div>
+        <div id="robotStatus" class="robot-status">Not connected</div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

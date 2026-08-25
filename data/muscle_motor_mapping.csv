@@ -1,0 +1,9 @@
+muscle_group,motor_id,motor_name,rotation_rate_rad_s,activation_level,starting_angle,angle_min,angle_max
+shoulder,1,shoulder_pan,0.1,0.5,-54.16,-54.16,-1.8
+,2,shoulder_lift,,,,,
+elbow_extension,3,elbow_flex,-0.3,0.5,36.61,-26.24,99.46
+elbow_flexion,3,elbow_flex,0.3,0.5,36.61,-26.24,99.46
+wrist_flexion,4,wrist_flex,0.3,0.5,-73.65,-99.56,-47.74
+wrist_extension,4,wrist_flex,-0.3,0.5,-73.65,-99.56,-47.74
+,5,wrist_roll,,,,,
+grip,6,gripper,0.3,0.5,0.07,0.07,29.22
