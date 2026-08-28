@@ -42,8 +42,8 @@ TRANSLATION_KEYS = {
 }
 GRIPPER_KEYS = {"e": 1, "q": -1}  # open / close
 
-# --- webcam control mode (arm_motion_tracker/) ---
-# Direct joint-space position control driven by the browser's predicted joint
+# --- webcam control mode (arm_motion_tracker/tracker.py) ---
+# Direct joint-space position control driven by tracker.py's predicted joint
 # state, instead of IK-based cartesian jogging. The tracker classifies each
 # human joint into one of three bands - "high"/"mid"/"low" (e.g. extended /
 # neutral / flexed) - and each control tick, every robot joint eases toward
@@ -203,7 +203,7 @@ async def run_webcam(follower):
     site = web.TCPSite(runner, "0.0.0.0", WS_PORT)
     await site.start()
     print(f"Webcam control bridge listening on ws://0.0.0.0:{WS_PORT}/ws")
-    print("Point arm_motion_tracker's robot-connect field at this host. Ctrl+C to quit.")
+    print("Run arm_motion_tracker/tracker.py --robot pointed at this host. Ctrl+C to quit.")
 
     try:
         while True:
@@ -245,8 +245,8 @@ def main():
     parser.add_argument(
         "--input", choices=["keyboard", "webcam"], default="keyboard",
         help="keyboard: IK cartesian jog via keypresses. "
-             "webcam: joints ease toward extended/neutral/flexed presets driven by the "
-             "arm_motion_tracker webapp over a websocket.",
+             "webcam: joints ease toward extended/neutral/flexed presets driven by "
+             "arm_motion_tracker/tracker.py over a websocket.",
     )
     args = parser.parse_args()
 
