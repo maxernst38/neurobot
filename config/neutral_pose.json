@@ -1,0 +1,8 @@
+{
+  "shoulder_pan": 0.18,
+  "shoulder_lift": 0.19,
+  "elbow_flex": 0.8,
+  "wrist_flex": 0.46,
+  "wrist_roll": 0.31,
+  "gripper": 0.92
+}

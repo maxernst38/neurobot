@@ -1,0 +1,583 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arm Motion Tracker</title>
+<!--
+  Front end for tracker.py --web. Served by webui.py; no build step and no
+  dependencies, so it can be edited and reloaded straight from disk.
+
+  The video and the 3D projections are MJPEG <img> tags, still rendered by
+  OpenCV. Everything else here is DOM driven by the /ws state feed, which is
+  the point of the port: the alignment readout you stand and read while
+  holding a pose is now text that reflows and a bar you can see across a
+  room, rather than 0.4-scale cv2.putText.
+
+  The single-key shortcuts from the OpenCV window all still work, so the
+  habit carries over; every one of them also has a button.
+-->
+<style>
+  :root {
+    --bg: #12151a; --panel: #171b21; --border: #262d36;
+    --text: #e6e9ef; --muted: #8a92a1;
+    --accent: #4f8cff; --ok: #33c481; --warn: #ff9e4a; --ghost: #ffd200;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  .spacer { flex: 1; }
+  .chip {
+    font-size: 12px; font-weight: 600; letter-spacing: .06em;
+    padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--muted); white-space: nowrap;
+  }
+  .chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .chip.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; padding: 14px; }
+  @media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card > h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+    margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .card > .body { padding: 12px 14px; }
+  .stack { display: flex; flex-direction: column; gap: 14px; }
+  /* One pane per camera, side by side while they fit and stacked when they
+     do not. A camera that has stopped delivering is then its own visibly
+     dead pane, rather than half of a single composed picture. */
+  .camgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  img.feed { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; object-fit: contain; }
+  .camhead { font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  .camhead.bad { color: var(--warn); }
+
+  button {
+    font: inherit; font-size: 13px; color: var(--text); background: #1e242c;
+    border: 1px solid var(--border); border-radius: 7px; padding: 7px 12px;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+  }
+  button:hover { border-color: #3a4450; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  button.primary[disabled] { background: #1e242c; border-color: var(--border); color: var(--muted); font-weight: 400; }
+  button[disabled] { cursor: not-allowed; opacity: .55; }
+  button kbd {
+    font: 600 10px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px; padding: 3px 4px; background: #12161c;
+  }
+  button.primary kbd { color: #0b1220; border-color: rgba(0,0,0,.25); background: rgba(255,255,255,.25); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Alignment: a deviation bar per joint, centred on zero with the engage
+     tolerance shaded. Reading "which way do I move" off this is meant to
+     work at arm's length, which the old text column did not. */
+  table.align { width: 100%; border-collapse: collapse; }
+  table.align td { padding: 4px 0; vertical-align: middle; }
+  table.align td.name { color: var(--muted); white-space: nowrap; padding-right: 10px; font-size: 13px; }
+  table.align td.val { text-align: right; padding-left: 10px; font: 600 13px ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
+  .bar { position: relative; height: 9px; border-radius: 5px; background: #0e1116; overflow: hidden; min-width: 90px; }
+  .bar .tol { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .bar .mid { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: #39414c; }
+  .bar .pip { position: absolute; top: 0; bottom: 0; width: 3px; border-radius: 2px; background: var(--warn); transition: left .08s linear; }
+  .bar .pip.ok { background: var(--ok); }
+
+  .metric { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 7px 0; border-top: 1px solid var(--border); }
+  .metric:first-child { border-top: 0; }
+  .metric .label { color: var(--muted); font-size: 13px; }
+  .metric .value { font: 600 15px ui-monospace, Menlo, Consolas, monospace; text-align: right; }
+  .metric .track { grid-column: 1 / -1; position: relative; height: 5px; border-radius: 3px; background: #0e1116; }
+  .metric .track .fill { position: absolute; top: 0; bottom: 0; width: 3px; border-radius: 2px; background: var(--accent); transition: left .08s linear; }
+  .metric.none .value, .metric.none .label { opacity: .45; }
+  .metric .state { grid-column: 1 / -1; font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+
+  .msg { margin-top: 10px; color: var(--accent); font-size: 13px; min-height: 0; }
+  .msg:empty { display: none; }
+  .stalled { color: var(--warn); font-size: 13px; margin-bottom: 8px; }
+  .hint { color: var(--muted); font-size: 12px; }
+
+  /* Jog. The console keys these mirror only reach a window that is behind
+     the browser, so under run_teleop.py this is the only way to drive it. */
+  .jog { display: grid; grid-template-columns: 1fr auto auto auto; gap: 7px 8px; align-items: center; }
+  .jog .jn { font-size: 13px; color: var(--muted); }
+  .jog .jp { font: 600 13px ui-monospace, Menlo, Consolas, monospace; text-align: right; min-width: 60px; }
+  .jog button { padding: 4px 11px; font: 600 14px/1 ui-monospace, Menlo, Consolas, monospace; }
+  .jk { font: 10px ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+  /* Range of motion: what your arm actually covers, vs. the generic
+     assumption the map ships with. */
+  .rng { display: grid; grid-template-columns: 1fr auto auto; gap: 4px 10px; align-items: center; }
+  .rng .rn { font-size: 13px; color: var(--muted); }
+  .rng .rv { font: 600 12px ui-monospace, Menlo, Consolas, monospace; text-align: right; white-space: nowrap; }
+  .rng .rc { font-size: 11px; text-align: right; white-space: nowrap; }
+  .rng .rc.ok { color: var(--ok); }
+  .rng .rc.no { color: var(--warn); }
+  .rec { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: var(--warn); margin-right: 6px; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  .drive { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin: 2px 4px 2px 0; }
+  .drive.live { color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); }
+  .drive.held { color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
+  .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 3px 0; }
+  .kv span:first-child { color: var(--muted); }
+
+  /* Per-landmark triangulation. Two cameras drawing a skeleton says nothing
+     about whether a joint was seen, so this says which gate each one failed. */
+  .jt { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .jt:first-child { border-top: 0; }
+  .jt .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-top: 5px; }
+  .jt.bad .dot { background: var(--warn); }
+  /* Kept only because the gates were relaxed: present, usable, and not a
+     measurement. Amber rather than green, and never silently green. */
+  .jt.inferred .dot { background: var(--ghost); }
+  .jt.inferred .why { color: var(--ghost); }
+  .jt .nm { font-size: 13px; }
+  .jt .why { grid-column: 2; font-size: 11px; color: var(--muted); }
+  .jt.bad .why { color: var(--warn); }
+  .jt .num { grid-column: 2; font: 11px ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+  #offline {
+    display: none; position: fixed; inset: 0; background: rgba(10,12,16,.88); z-index: 10;
+    align-items: center; justify-content: center; text-align: center; padding: 20px;
+  }
+  #offline.show { display: flex; }
+</style>
+
+<header>
+  <h1>Arm Motion Tracker</h1>
+  <span class="chip" id="chip-robot">ROBOT —</span>
+  <span class="chip" id="chip-link">link —</span>
+  <span class="chip" id="chip-tri">triangulation —</span>
+  <span class="spacer"></span>
+  <span class="chip" id="chip-side">RIGHT arm</span>
+  <span class="chip" id="chip-fps">— fps</span>
+</header>
+
+<main>
+  <div class="stack">
+    <div class="camgrid" id="cam-grid"></div>
+    <div class="card" id="views-card">
+      <h2><span>3D projections</span><span class="hint">front / side / top — fused skeleton</span></h2>
+      <img class="feed" id="views" data-stream="views" alt="3D projections">
+    </div>
+    <div class="card">
+      <div class="body row">
+        <button id="btn-side"><span>Switch arm</span><kbd>space</kbd></button>
+        <button id="btn-tri" aria-pressed="false"><span>Triangulation</span><kbd>T</kbd></button>
+        <button id="btn-trust" aria-pressed="false"><span>Keep inferred joints</span><kbd>I</kbd></button>
+        <button id="btn-views" aria-pressed="true"><span>3D views</span><kbd>V</kbd></button>
+        <button id="btn-link"><span>Connect robot</span><kbd>C</kbd></button>
+        <span class="spacer"></span>
+        <button id="btn-quit"><span>Quit tracker</span><kbd>Q</kbd></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h2><span>Robot</span><span class="chip" id="robot-state">—</span></h2>
+      <div class="body">
+        <div id="stalled"></div>
+        <div id="align"><p class="hint">No robot connected. Press <b>Connect robot</b> to link to the control bridge.</p></div>
+        <p class="hint" id="align-hint" hidden>Bars show how far each joint is from the arm's pose; green band is close enough to engage.</p>
+        <div class="msg" id="robot-msg"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="btn-engage" disabled><span>Engage</span><kbd>E</kbd></button>
+          <button id="btn-disengage" disabled><span>Release</span><kbd>R</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span id="metrics-title">Metrics</span></h2>
+      <div class="body" id="metrics"></div>
+    </div>
+
+    <div class="card">
+      <h2><span>My range of motion</span><span class="hint" id="rng-status"></span></h2>
+      <div class="body">
+        <p class="hint" id="rng-intro">The map assumes a generic arm. Record your own
+          reach so a degree of your movement means the right amount of robot movement.
+          Start, then move every joint through its full comfortable travel — including
+          opening and closing your hand — for about 30 seconds.</p>
+        <div class="rng" id="rng"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="btn-rec"><span>Start recording</span></button>
+          <button id="btn-rec-save" disabled><span>Save &amp; apply</span></button>
+          <button id="btn-rec-clear" disabled><span>Discard</span></button>
+        </div>
+        <div class="msg" id="rng-note"></div>
+      </div>
+    </div>
+
+    <div class="card" id="jog-card" hidden>
+      <h2><span>Jog the arm</span><span class="hint" id="jog-step"></span></h2>
+      <div class="body">
+        <div class="jog" id="jog"></div>
+        <div class="row" style="margin-top:12px">
+          <button id="btn-save"><span>Save as startup pose</span><kbd>P</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="joints-card" hidden>
+      <h2><span>Triangulation</span><span class="hint" id="joints-count"></span></h2>
+      <div class="body" id="joints"></div>
+    </div>
+
+    <div class="card">
+      <h2><span>Status</span></h2>
+      <div class="body" id="status"></div>
+    </div>
+  </div>
+</main>
+
+<div id="offline"><div>
+  <h2>Tracker disconnected</h2>
+  <p class="hint">The tracker process stopped, or the page lost its connection.<br>Reconnecting…</p>
+</div></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let ws = null, lastState = null, camSig = "";
+
+// MJPEG sources are set only once the socket is up, and cleared when it
+// drops: a stream left attached to a dead server keeps the browser's
+// per-host connection slot busy and blocks the reconnect.
+function setFeed(img, want) {
+  if (!img) return;
+  if (want && !img.getAttribute("src")) img.src = `/stream/${img.dataset.stream}.mjpg?t=${Date.now()}`;
+  if (!want && img.getAttribute("src")) img.removeAttribute("src");
+}
+
+function setFeeds(on) {
+  for (const img of document.querySelectorAll("img.feed[data-stream]")) {
+    setFeed(img, on && (img.dataset.stream !== "views" || !$("views-card").hidden));
+  }
+}
+
+// Panes are rebuilt only when the set of cameras changes -- rebuilding every
+// frame would drop and reopen every MJPEG connection 30 times a second.
+function syncCameras(cams) {
+  const sig = cams.map(c => `${c.stream}:${c.name}`).join("|");
+  if (sig !== camSig) {
+    camSig = sig;
+    $("cam-grid").innerHTML = cams.map(c => `
+      <div class="card">
+        <h2><span>${c.name} — index ${c.index}</span></h2>
+        <img class="feed" data-stream="${c.stream}" alt="${c.name}">
+        <div class="body camhead" data-health="${c.stream}"></div>
+      </div>`).join("");
+    setFeeds(true);
+  }
+  for (const c of cams) {
+    const el = document.querySelector(`[data-health="${c.stream}"]`);
+    if (!el) continue;
+    const bits = [`${c.size[0]}×${c.size[1]}`];
+    if (c.health) bits.push(c.health);
+    bits.push(c.pose ? "pose detected" : "no pose in view");
+    if (c.stale) bits.push(`${c.stale} repeated frames`);
+    el.textContent = bits.join("   ·   ");
+    el.className = "body camhead" + (c.pose ? "" : " bad");
+  }
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { $("offline").classList.remove("show"); setFeeds(true); };
+  ws.onmessage = (ev) => render(JSON.parse(ev.data));
+  ws.onclose = () => {
+    ws = null; setFeeds(false);
+    $("offline").classList.add("show");
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => ws && ws.close();
+}
+
+function send(action) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ action }));
+}
+
+const fmt = (v, unit) => v === null || v === undefined ? "—"
+  : unit === "deg" ? `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}°` : v.toFixed(2);
+
+function render(s) {
+  lastState = s;
+  const robot = s.robot;
+
+  $("chip-fps").textContent = s.fps ? `${s.fps.toFixed(0)} fps` : "— fps";
+  $("chip-side").textContent = `${s.side} arm`;
+  $("chip-link").textContent = `link ${s.link.status}`;
+  $("chip-link").className = "chip " + (s.link.connected ? "ok" : s.link.status === "error" ? "warn" : "");
+  $("chip-tri").textContent = `triangulation ${s.triangulation.status}`;
+  $("chip-tri").className = "chip " + (s.triangulation.enabled && s.triangulation.live ? "ok" : "warn");
+  $("metrics-title").textContent = `Metrics — ${s.source}`;
+  syncCameras(s.cameras);
+
+  const state = robot ? robot.state : (s.link.connected ? "…" : "—");
+  $("robot-state").textContent = state;
+  $("robot-state").className = "chip " + ({ ENGAGED: "ok", READY: "accent", HOMING: "warn" }[state] || "");
+  $("chip-robot").textContent = `ROBOT ${state}`;
+  $("chip-robot").className = $("robot-state").className;
+
+  $("btn-tri").setAttribute("aria-pressed", String(!!s.triangulation.enabled));
+  $("btn-tri").disabled = !s.triangulation.available;
+  $("btn-trust").setAttribute("aria-pressed", String(!!s.triangulation.trustInferred));
+  $("btn-trust").disabled = !s.triangulation.available;
+  $("btn-views").setAttribute("aria-pressed", String(!!s.views));
+  $("views-card").hidden = !s.views;
+  setFeeds(true);
+  $("btn-link").querySelector("span").textContent =
+    s.link.connected ? "Disconnect robot" : "Connect robot";
+  $("btn-engage").disabled = !robot || state === "ENGAGED";
+  $("btn-disengage").disabled = !robot || state !== "ENGAGED";
+  if (robot && robot.aligned && state !== "ENGAGED") {
+    $("btn-engage").querySelector("span").textContent = "Engage — aligned";
+  } else {
+    $("btn-engage").querySelector("span").textContent = "Engage";
+  }
+
+  renderRanges(s.ranges || {});
+  renderJog(robot);
+  renderJoints(s.triangulation.joints || []);
+  renderAlign(robot, s.metrics, s.link);
+  renderMetrics(s.metrics);
+  renderStatus(s);
+}
+
+function renderAlign(robot, metrics, link) {
+  const box = $("align"), stalled = $("stalled");
+  stalled.textContent = (robot && robot.stalled || [])
+    .map(j => `${j} is not moving`).join(" · ");
+  stalled.className = stalled.textContent ? "stalled" : "";
+  $("robot-msg").textContent = robot && robot.message || "";
+
+  if (!robot) {
+    // Connected but silent is a different situation from not connected:
+    // main.py only starts sending state once its control loop is running.
+    box.innerHTML = link.connected
+      ? `<p class="hint">Connected — waiting for the robot's first state frame…</p>`
+      : `<p class="hint">No robot connected. Press <b>Connect robot</b> to link to the control bridge.</p>`;
+    $("align-hint").hidden = true;
+    return;
+  }
+  if (robot.state === "ENGAGED") {
+    // Which joints are actually receiving a target. A joint whose metric is
+    // missing keeps its last one and stops moving, which from the outside is
+    // indistinguishable from a dead servo -- so name it rather than let the
+    // arm look broken.
+    const driving = robot.driving || [];
+    const arm = JOG_ROWS.map(r => r[0]).filter(j => j !== "gripper");
+    const chips = arm.map(j =>
+      `<span class="drive ${driving.includes(j) ? "live" : "held"}">${j}` +
+      `${driving.includes(j) ? "" : " held"}</span>`).join("");
+    const stuck = arm.filter(j => !driving.includes(j));
+    box.innerHTML = `<p class="hint">Tracking your arm. Press <b>Release</b> to hand control back.</p>
+      <div style="margin-top:8px">${chips}</div>` +
+      (stuck.length ? `<p class="hint" style="margin-top:8px">A held joint has no reading to
+        follow, so it keeps its last target. Check the Triangulation panel.</p>` : "");
+    $("align-hint").hidden = true;
+    return;
+  }
+  const errors = robot.errors || {}, tol = robot.tolerance || {};
+  const rows = metrics.filter(m => m.key in errors).map(m => {
+    const delta = errors[m.key];
+    const limit = m.key === "grip" ? (tol.grip ?? 0.25) : (tol.angle ?? 15);
+    if (delta === null || delta === undefined) {
+      return `<tr><td class="name">${m.short}</td><td><div class="bar"><div class="mid"></div></div></td>
+              <td class="val" style="color:var(--warn)">no reading</td></tr>`;
+    }
+    const ok = Math.abs(delta) <= limit;
+    // Full scale is three tolerances either side; anything further is pinned
+    // to the end, since past that the only useful information is "way out".
+    const span = limit * 3;
+    const pct = 50 + Math.max(-50, Math.min(50, (delta / span) * 50));
+    const tolPct = (limit / span) * 50;
+    const text = ok ? "ok" : (m.key === "grip"
+      ? `${delta < 0 ? "close" : "open"} ${Math.abs(delta).toFixed(2)}`
+      : `${delta < 0 ? "+" : "−"}${Math.abs(delta).toFixed(0)}°`);
+    return `<tr><td class="name">${m.short}</td>
+      <td><div class="bar">
+        <div class="tol" style="left:${50 - tolPct}%;width:${tolPct * 2}%"></div>
+        <div class="mid"></div>
+        <div class="pip ${ok ? "ok" : ""}" style="left:calc(${pct}% - 1.5px)"></div>
+      </div></td>
+      <td class="val" style="color:${ok ? "var(--ok)" : "var(--warn)"}">${text}</td></tr>`;
+  });
+  box.innerHTML = rows.length
+    ? `<table class="align">${rows.join("")}</table>`
+    : `<p class="hint">Waiting for a triangulated pose.</p>`;
+  $("align-hint").hidden = !rows.length;
+}
+
+// Same order and the same keys as main.py's console jog, so the habit
+// carries between the two. The console keys still work when it has focus.
+// Display order and short labels for the range card, matching METRICS in
+// tracker.py. Kept here rather than derived from state.metrics because the
+// card must render before any metric has a reading.
+const METRIC_ORDER = ["shoulder_rotation", "shoulder_flexion", "elbow_flexion",
+                      "wrist_flexion", "wrist_rotation", "grip"];
+const LABELS = {
+  shoulder_rotation: "Shoulder rotation", shoulder_flexion: "Shoulder flex",
+  elbow_flexion: "Elbow flex", wrist_flexion: "Wrist flex",
+  wrist_rotation: "Wrist rotation", grip: "Hand grip",
+};
+
+const JOG_ROWS = [
+  ["shoulder_pan", "Shoulder pan", "a", "z"],
+  ["shoulder_lift", "Shoulder lift", "s", "x"],
+  ["elbow_flex", "Elbow", "d", "c"],
+  ["wrist_flex", "Wrist flex", "f", "v"],
+  ["wrist_roll", "Wrist roll", "g", "b"],
+  ["gripper", "Gripper", "h", "n"],
+];
+
+function jogValue(robot, joint) {
+  const v = joint === "gripper" ? robot.gripper : (robot.joints || {})[joint];
+  if (v === undefined || v === null) return "—";
+  return joint === "gripper" ? `${v.toFixed(0)}%`
+    : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}°`;
+}
+
+function renderJog(robot) {
+  const on = !!robot && robot.state !== "ENGAGED";
+  $("jog-card").hidden = !on;
+  if (!on) return;
+  $("jog-step").textContent = robot.step ? `${robot.step.toFixed(2)}° per press` : "";
+  $("jog").innerHTML = JOG_ROWS.map(([joint, label, up, down]) => `
+    <div class="jn">${label}<br><span class="jk">${down} / ${up}</span></div>
+    <div class="jp">${jogValue(robot, joint)}</div>
+    <button data-jog="${joint}" data-dir="-" title="key ${down}">−</button>
+    <button data-jog="${joint}" data-dir="+" title="key ${up}">+</button>`).join("");
+}
+
+function renderRanges(r) {
+  const spans = r.spans || {};
+  const rec = !!r.recording;
+  $("rng-status").innerHTML = rec
+    ? `<span class="rec"></span>recording — ${(r.seconds || 0).toFixed(0)}s`
+    : (r.file || "");
+  $("btn-rec").querySelector("span").textContent = rec ? "Stop recording" : "Start recording";
+  $("btn-rec").className = rec ? "" : "primary";
+  const any = Object.values(spans).some(v => v.n > 0);
+  $("btn-rec-save").disabled = rec || !Object.values(spans).some(v => v.ok);
+  $("btn-rec-clear").disabled = rec || !any;
+  $("rng-intro").hidden = any;
+  $("rng-note").textContent = r.note || "";
+
+  $("rng").innerHTML = METRIC_ORDER.filter(k => spans[k]).map(k => {
+    const v = spans[k];
+    const grip = k === "grip";
+    const shown = v.lo === null ? "—"
+      : grip ? `${v.lo.toFixed(2)} … ${v.hi.toFixed(2)}`
+             : `${v.lo >= 0 ? "+" : "−"}${Math.abs(v.lo).toFixed(0)}° … ` +
+               `${v.hi >= 0 ? "+" : "−"}${Math.abs(v.hi).toFixed(0)}°`;
+    const span = v.lo === null ? "" : grip ? (v.hi - v.lo).toFixed(2)
+                                           : `${(v.hi - v.lo).toFixed(0)}°`;
+    return `<div class="rn">${LABELS[k] || k}</div>
+      <div class="rv">${shown}</div>
+      <div class="rc ${v.ok ? "ok" : "no"}">${v.ok ? span : (v.reason || "—")}</div>`;
+  }).join("");
+}
+
+function renderJoints(joints) {
+  $("joints-card").hidden = !joints.length;
+  if (!joints.length) return;
+  const ok = joints.filter(j => j.ok).length;
+  const guessed = joints.filter(j => j.ok && !j.trusted).length;
+  $("joints-count").textContent =
+    `${ok}/${joints.length} landmarks` + (guessed ? `, ${guessed} inferred` : "");
+  $("joints-count").style.color =
+    ok < joints.length ? "var(--warn)" : guessed ? "var(--ghost)" : "var(--ok)";
+  $("joints").innerHTML = joints.map(j => {
+    const cls = !j.ok ? "bad" : j.trusted ? "" : "inferred";
+    const nums = j.cam1 === null ? ""
+      : `seen ${j.cam1.toFixed(2)} / ${j.cam2.toFixed(2)}` +
+        (j.reproj === null ? "" : `   ·   ${j.reproj.toFixed(0)} px apart`);
+    return `<div class="jt ${cls}">
+      <div class="dot"></div><div class="nm">${j.name}</div>
+      ${j.trusted ? "" : `<div class="why">${j.reason}</div>`}
+      ${nums ? `<div class="num">${nums}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function renderMetrics(metrics) {
+  $("metrics").innerHTML = metrics.map(m => {
+    const has = m.value !== null && m.value !== undefined;
+    const pct = has ? ((m.value - m.min) / (m.max - m.min)) * 100 : 0;
+    const color = m.state === "high" ? "var(--ok)" : m.state === "low" ? "var(--warn)" : "var(--accent)";
+    return `<div class="metric ${has ? "" : "none"}">
+      <div class="label">${m.label}</div>
+      <div class="value" style="color:${has ? color : ""}">${fmt(m.value, m.unit)}</div>
+      <div class="track">${has ? `<div class="fill" style="left:calc(${Math.max(0, Math.min(100, pct))}% - 1.5px);background:${color}"></div>` : ""}</div>
+      <div class="state">${m.stateLabel}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderStatus(s) {
+  const rows = [
+    ...s.cameras.map(c => [c.name, c.pose ? "detecting" : "no pose"]),
+    ["Metrics source", s.source],
+    ["Triangulation", s.triangulation.status],
+    ["Inferred joints", s.triangulation.trustInferred ? "kept, labelled" : "dropped"],
+    ["Calibration", s.triangulation.calibration],
+    ["Robot link", s.link.status],
+    ["Tracked side", s.side],
+  ];
+  $("status").innerHTML = rows
+    .map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+}
+
+$("btn-side").onclick = () => send("side");
+$("btn-tri").onclick = () => send("triangulation");
+$("btn-trust").onclick = () => send("trust");
+$("btn-save").onclick = () => send("save-pose");
+$("btn-rec").onclick = () =>
+  send(lastState && lastState.ranges && lastState.ranges.recording
+       ? "range-stop" : "range-start");
+$("btn-rec-save").onclick = () => send("range-save");
+$("btn-rec-clear").onclick = () => send("range-clear");
+$("jog").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-jog]");
+  if (b) send(`jog:${b.dataset.jog}:${b.dataset.dir}`);
+});
+$("btn-views").onclick = () => send("views");
+$("btn-link").onclick = () => send("link");
+$("btn-engage").onclick = () => send("engage");
+$("btn-disengage").onclick = () => send("disengage");
+$("btn-quit").onclick = () => { if (confirm("Stop the tracker?")) send("quit"); };
+
+// Same keys as the OpenCV window had, so the habit carries across.
+// R releases, not D: d is the console's elbow-down jog and this page now
+// has both sets of keys, so one letter cannot mean two things.
+const KEYS = { " ": "side", t: "triangulation", i: "trust", v: "views",
+               c: "link", e: "engage", r: "disengage", p: "save-pose" };
+const JOG_KEYS = {};
+for (const [joint, , up, down] of JOG_ROWS) {
+  JOG_KEYS[up] = `jog:${joint}:+`;
+  JOG_KEYS[down] = `jog:${joint}:-`;
+}
+addEventListener("keydown", (ev) => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const key = ev.key.toLowerCase();
+  // Jog keys only while jogging is actually offered, so they cannot fire
+  // while engaged -- where the bridge would ignore them anyway.
+  const action = (!$("jog-card").hidden && JOG_KEYS[key]) || KEYS[key];
+  if (!action) return;
+  ev.preventDefault();
+  send(action);
+});
+
+connect();
+</script>

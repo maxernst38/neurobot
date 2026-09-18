@@ -37,7 +37,9 @@ def checkerboard_image(cols, rows, px_per_square=100):
     inner corners, which is what OpenCV's findChessboardCorners wants)."""
     board = np.indices((rows, cols)).sum(axis=0) % 2
     img = np.kron(board, np.ones((px_per_square, px_per_square), dtype=np.uint8)) * 255
-    return 255 - img
+    # np.kron promotes through int64; return 8-bit so the image is usable by
+    # OpenCV (warpPerspective and friends reject wider integer types).
+    return (255 - img).astype(np.uint8)
 
 
 def charuco_board(cols, rows, square_mm, marker_ratio=0.72, px_per_square=100):

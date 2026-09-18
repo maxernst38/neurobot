@@ -1,2 +1,6 @@
 __pycache__/
 arm_motion_tracker/models/
+
+arm_motion_tracker/calibration/
+data/
+figures/

@@ -1,0 +1,42 @@
+# Dependencies for arm_motion_tracker (tracker.py, calibrate_cameras.py,
+# make_calibration_board.py). Install with:
+#
+#     pip install -r arm_motion_tracker/requirements.txt
+#
+# Verified against Python 3.10 with opencv 5.0.0, mediapipe 1.0.1,
+# numpy 2.2.6, matplotlib 3.10.9, websockets 16.1.1.
+
+# ChArUco lives in cv2.aruco. Use the *contrib* wheel, and do NOT also
+# install opencv-python -- the two overwrite each other's cv2 package and
+# which one wins depends on install order. 4.8 is the floor: the code uses
+# the post-4.7 API (CharucoDetector, board.matchImagePoints,
+# findChessboardCornersSB), not the removed calibrateCameraCharuco.
+# The wheel is cp37-abi3, so it installs on any modern Python; pip currently
+# resolves 5.0.0.93 on Windows, matching the 5.0.0 this was developed against.
+opencv-contrib-python>=4.8
+
+# Pose and hand landmarkers, via mediapipe.tasks.python.vision. Needs to be
+# recent enough to expose pose_world_landmarks, which is what makes the
+# joint angles metric rather than a monocular depth guess.
+mediapipe>=0.10.9
+
+numpy>=1.24
+
+# make_calibration_board.py only -- it places the board on the page at exact
+# millimetre dimensions, which is what stops "fit to page" silently
+# rescaling the pattern.
+matplotlib>=3.7
+
+# tracker.py's robot link only, and imported lazily, so tracking and
+# calibration both work without it.
+websockets>=12.0
+
+# tracker.py --web only (webui.py), also imported lazily -- the OpenCV window
+# needs none of it. Already required by main.py, which serves the control
+# bridge with the same library, so this is usually already installed.
+aiohttp>=3.9
+
+# Not pip-installable, and not listed above because it ships with Python:
+#   tkinter -- used only to read the screen size so the window is scaled to
+#   fit. It degrades to a 1600x900 assumption if missing, so a python.org or
+#   conda install (both include it) is fine either way.
