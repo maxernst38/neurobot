@@ -4,3 +4,8 @@ arm_motion_tracker/models/
 arm_motion_tracker/calibration/
 data/
 figures/
+
+# Session captures: ~8.8 MB per minute uncompressed. Keep them as research
+# data alongside the repo, not inside it -- and archive the ones that matter
+# deliberately rather than by accident.
+recordings/

@@ -114,6 +114,12 @@ def main():
                              "ones the cameras did not clearly see")
     parser.add_argument("--hands", choices=["metrics", "all", "off"],
                         help="which cameras run the hand model (default: only the one driving grip)")
+    # Capturing a teleop run is the case worth recording without having to
+    # remember to press anything: what the cameras saw, and what the robot
+    # was told, for the session you are about to do rather than the next one.
+    parser.add_argument("--record", action="store_true",
+                        help="record the session from the moment tracking starts")
+    parser.add_argument("--record-note", help="note stored in the recording's header")
     # The tracker UI is a browser page by default now. The OpenCV window it
     # replaced could not be resized without rescaling the video with it, and
     # put the alignment readout -- the thing you stand and read while holding
@@ -139,6 +145,10 @@ def main():
         tracker_cmd.append("--no-views")
     if args.trust_inferred:
         tracker_cmd.append("--trust-inferred")
+    if args.record:
+        tracker_cmd.append("--record")
+    if args.record_note:
+        tracker_cmd += ["--record-note", args.record_note]
     if not args.window:
         tracker_cmd.append("--web")
         for flag in ("web_port", "web_host"):

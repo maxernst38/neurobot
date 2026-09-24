@@ -100,16 +100,35 @@ ELBOW_P_COEFFICIENT = 32
 # few degrees of a joint most people cannot reach comfortably just wastes
 # robot travel.
 #
-# CAVEAT: shoulder_rotation and wrist_rotation are still expressed in camera
-# 1's axes rather than a body frame, so their zero depends on where that
-# camera sits. Moving a camera changes what they mean, and the neutral pose
-# has to be re-captured. The other three are frame-independent.
+# shoulder_rotation is the upper arm's heading in a torso frame built from
+# the hips and shoulders: zero is the arm straight out to the side, positive
+# swung forward. All four are now frame-independent, so moving a camera no
+# longer changes what any of them mean.
+#
+# It was previously the forearm's bearing in camera 1's axes, which made it
+# both camera-dependent and entangled with the elbow -- 120 degrees of elbow
+# flexion swung it 99.5 degrees with the shoulder held still, and it
+# answered a 100-degree arm swing with only 47 degrees, non-linearly. Its
+# human range below is therefore a different quantity from the one older
+# recordings measured; see GEOMETRY_VERSION.
+#
+# wrist_roll is deliberately absent, so nothing drives it from the cameras.
+# The map turns a fraction of a human range into the same fraction of a
+# robot range, and wrist_roll has no measured range to be a fraction of:
+# lerobot treats it as the arm's full_turn_motor and skips it during
+# record_ranges_of_motion, pinning it to a whole revolution rather than
+# recording where it can actually go. Its human counterpart was no better --
+# a palm-normal bearing in camera 1's frame, which wraps at +-180 where the
+# linear map has no meaning. Two ends of a mapping, neither of them a range.
+# The joint still holds position and still takes jog keys; it just is not
+# something the cameras have an opinion about.
 JOINT_MAP = {
-    "shoulder_rotation": {"joint": "shoulder_pan", "human": (-60.0, 60.0)},
+    # 0 = arm straight out to the side, 120 = swung well across the body.
+    # Not the old (-60, 60): that bracketed a different angle entirely.
+    "shoulder_rotation": {"joint": "shoulder_pan", "human": (0.0, 120.0)},
     "shoulder_flexion": {"joint": "shoulder_lift", "human": (0.0, 150.0)},
     "elbow_flexion": {"joint": "elbow_flex", "human": (30.0, 180.0)},
     "wrist_flexion": {"joint": "wrist_flex", "human": (-70.0, 70.0)},
-    "wrist_rotation": {"joint": "wrist_roll", "human": (-90.0, 90.0)},
 }
 
 
@@ -126,6 +145,25 @@ ARM_RANGES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # right answer.
 MIN_HUMAN_SPAN_DEG = 20.0
 MIN_GRIP_SPAN = 0.15
+
+# Must match tracker.GEOMETRY_VERSION. A recorded range measures a specific
+# definition of an angle, so one recorded before a definition changed is not
+# merely out of date -- it is a wrong span, and the map turns a wrong span
+# into a wrong gain. Too small a gain is a joint that never reaches; too
+# large is an arm that crosses its travel on a small movement of yours,
+# which is the direction that matters. So a mismatch is refused rather than
+# applied, and the defaults stand until it is re-recorded.
+#
+# Version 2 changed shoulder_rotation from the forearm's bearing in camera
+# 1's axes to the upper arm's heading in a torso frame. Anything recorded
+# as version 1 (or unversioned) measured the old angle.
+GEOMETRY_VERSION = 2
+
+# Only the metrics whose geometry actually changed. A grip curl or an elbow
+# angle recorded under version 1 is still exactly the same measurement, and
+# throwing those away would cost someone their whole calibration session to
+# fix one entry.
+GEOMETRY_CHANGED_IN = {"shoulder_rotation": 2}
 
 
 def apply_arm_ranges(data, source="file"):
@@ -145,9 +183,18 @@ def apply_arm_ranges(data, source="file"):
     """
     global GRIP_RANGE
     notes = []
+    recorded_version = int(data.get("geometry", 1) or 1)
     for metric, spec in JOINT_MAP.items():
         pair = data.get(metric)
         if pair is None:
+            continue
+        changed_at = GEOMETRY_CHANGED_IN.get(metric)
+        if changed_at is not None and recorded_version < changed_at:
+            notes.append(
+                f"{metric}: recorded against older geometry (v{recorded_version}); "
+                f"its definition changed in v{changed_at}, so the span no longer "
+                f"means the same angle. Keeping default "
+                f"{spec['human'][0]:+.0f}..{spec['human'][1]:+.0f} -- re-record to fix.")
             continue
         try:
             lo, hi = (float(pair[0]), float(pair[1]))
@@ -1097,6 +1144,7 @@ async def run_webcam(follower):
                     "errors": errors,
                     "stalled": sorted(stalled),
                     "driving": sorted(driven) if state == "ENGAGED" else [],
+                    "mapped": sorted(sp["joint"] for sp in JOINT_MAP.values()),
                     "joints": {n: round(present[n], 1) for n in ARM_JOINTS},
                     "gripper": round(present_grip, 1),
                     "step": JOG_STEP_WEBCAM,

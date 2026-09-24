@@ -124,6 +124,25 @@
          background: var(--warn); margin-right: 6px; animation: pulse 1.2s infinite; }
   @keyframes pulse { 50% { opacity: .25; } }
 
+  /* Recording and replay. The transport sits directly under the camera
+     panes, because what you scrub is what they show. */
+  select {
+    font: inherit; font-size: 13px; color: var(--text); background: #1e242c;
+    border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px; max-width: 100%;
+  }
+  select:disabled { opacity: .55; cursor: not-allowed; }
+  input[type=range] {
+    width: 100%; accent-color: var(--accent); margin: 2px 0 8px; cursor: pointer;
+  }
+  .tline {
+    font: 600 13px ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+    white-space: nowrap; align-self: center;
+  }
+  .dot-rec {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #ff5f56; margin-right: 6px; animation: pulse 1.2s infinite;
+  }
+
   .drive { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin: 2px 4px 2px 0; }
   .drive.live { color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); }
   .drive.held { color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
@@ -177,6 +196,55 @@
         <button id="btn-link"><span>Connect robot</span><kbd>C</kbd></button>
         <span class="spacer"></span>
         <button id="btn-quit"><span>Quit tracker</span><kbd>Q</kbd></button>
+      </div>
+    </div>
+
+    <div class="card" id="capture-card">
+      <h2><span>Record this session</span><span class="hint" id="capture-head"></span></h2>
+      <div class="body">
+        <p class="hint" id="capture-intro">Captures every frame: what each camera saw,
+          where that put each joint in 3D, and the angles measured from it. Because the
+          camera views are kept, a recording can be re-analysed later against a new
+          calibration or changed code — not just watched.</p>
+        <div class="row">
+          <button class="primary" id="btn-capture"><span>Start recording</span></button>
+          <button id="btn-capture-video" aria-pressed="false"><span>Keep raw video</span></button>
+          <span class="spacer"></span>
+          <select id="capture-mask" aria-label="Face masking"></select>
+        </div>
+        <p class="hint" id="capture-video-hint"></p>
+        <p class="hint" id="capture-mask-hint"></p>
+        <div class="msg" id="capture-note"></div>
+      </div>
+    </div>
+
+    <div class="card" id="replay-card">
+      <h2><span>Replay a recording</span><span class="hint" id="replay-head"></span></h2>
+      <div class="body">
+        <div class="row">
+          <select id="replay-file" style="flex:1; min-width:180px"></select>
+          <button class="primary" id="btn-replay-open"><span>Open</span></button>
+          <button id="btn-replay-close" hidden><span>Close</span></button>
+        </div>
+
+        <div id="replay-transport" hidden style="margin-top:12px">
+          <input type="range" id="replay-scrub" min="0" max="1000" step="1" value="0"
+                 aria-label="Position in the recording">
+          <div class="row">
+            <button id="btn-replay-back" title="previous frame">◀|</button>
+            <button class="primary" id="btn-replay-play"><span>Play</span><kbd>K</kbd></button>
+            <button id="btn-replay-fwd" title="next frame">|▶</button>
+            <span class="tline" id="replay-time">—</span>
+            <span class="spacer"></span>
+            <select id="replay-speed" aria-label="Playback speed"></select>
+            <button id="btn-replay-loop" aria-pressed="true"><span>Loop</span></button>
+          </div>
+          <p class="hint" style="margin:12px 0 6px">Read the recorded frame as:</p>
+          <div class="row" id="replay-derive"></div>
+          <p class="hint" id="replay-derive-hint" style="margin-top:8px"></p>
+        </div>
+
+        <div class="msg" id="replay-note"></div>
       </div>
     </div>
   </div>
@@ -346,6 +414,8 @@ function render(s) {
     $("btn-engage").querySelector("span").textContent = "Engage";
   }
 
+  renderCapture(s.capture || {});
+  renderReplay(s.replay || {});
   renderRanges(s.ranges || {});
   renderJog(robot);
   renderJoints(s.triangulation.joints || []);
@@ -376,7 +446,7 @@ function renderAlign(robot, metrics, link) {
     // indistinguishable from a dead servo -- so name it rather than let the
     // arm look broken.
     const driving = robot.driving || [];
-    const arm = JOG_ROWS.map(r => r[0]).filter(j => j !== "gripper");
+    const arm = robot.mapped || [];
     const chips = arm.map(j =>
       `<span class="drive ${driving.includes(j) ? "live" : "held"}">${j}` +
       `${driving.includes(j) ? "" : " held"}</span>`).join("");
@@ -425,11 +495,10 @@ function renderAlign(robot, metrics, link) {
 // tracker.py. Kept here rather than derived from state.metrics because the
 // card must render before any metric has a reading.
 const METRIC_ORDER = ["shoulder_rotation", "shoulder_flexion", "elbow_flexion",
-                      "wrist_flexion", "wrist_rotation", "grip"];
+                      "wrist_flexion", "grip"];
 const LABELS = {
-  shoulder_rotation: "Shoulder rotation", shoulder_flexion: "Shoulder flex",
-  elbow_flexion: "Elbow flex", wrist_flexion: "Wrist flex",
-  wrist_rotation: "Wrist rotation", grip: "Hand grip",
+  shoulder_rotation: "Shoulder heading", shoulder_flexion: "Shoulder flex",
+  elbow_flexion: "Elbow flex", wrist_flexion: "Wrist flex", grip: "Hand grip",
 };
 
 const JOG_ROWS = [
@@ -458,6 +527,128 @@ function renderJog(robot) {
     <div class="jp">${jogValue(robot, joint)}</div>
     <button data-jog="${joint}" data-dir="-" title="key ${down}">−</button>
     <button data-jog="${joint}" data-dir="+" title="key ${up}">+</button>`).join("");
+}
+
+const MB = (n) => n >= 1 ? `${n.toFixed(1)} MB` : `${(n * 1000).toFixed(0)} kB`;
+const clock = (sec) => {
+  const s = Math.max(0, sec || 0);
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+};
+
+function renderCapture(c) {
+  const on = !!c.recording;
+  $("capture-head").innerHTML = on
+    ? `<span class="dot-rec"></span>${c.file} — ${clock(c.seconds)}, ${c.frames} frames, ${MB(c.megabytes || 0)}`
+    : (c.directory ? `saved to ${c.directory.split(/[\\/]/).pop()}/` : "");
+  const btn = $("btn-capture");
+  btn.querySelector("span").textContent = on ? "Stop and save" : "Start recording";
+  btn.className = on ? "" : "primary";
+  // Recording a replay would write a file derived from another one, which
+  // is indistinguishable from a capture afterwards. The tracker refuses it;
+  // the button says so rather than failing silently when pressed.
+  btn.disabled = !on && !c.available;
+
+  const vid = $("btn-capture-video");
+  vid.setAttribute("aria-pressed", String(!!c.wantVideo));
+  // Footage is decided when the files are opened, so this cannot change
+  // mid-capture; it is a choice for the next recording.
+  vid.disabled = on;
+  vid.title = on ? "Stop the recording to change this" : "";
+  $("capture-video-hint").textContent = c.video
+    ? `Also writing ${(c.videoFiles || []).join(", ")}` +
+      (c.videoDropped ? ` — ${c.videoDropped} frames dropped under load` : "")
+    : c.wantVideo
+      ? "The next recording keeps each camera's raw frames too: the pose model can "
+        + "be re-run on them later, at roughly 15–40 MB per minute per camera."
+      : "Landmarks only — about 8.8 MB per minute. The pose model cannot be re-run "
+        + "on a capture without its video.";
+  const MASK_LABEL = { off: "Faces: not masked", block: "Faces: blacked out",
+                       blur: "Faces: pixelated" };
+  const sel = $("capture-mask");
+  const modes = c.maskModes || ["off"];
+  if (sel.options.length !== modes.length) {
+    sel.innerHTML = modes.map(m => `<option value="${m}">${MASK_LABEL[m] || m}</option>`).join("");
+  }
+  if (sel.value !== c.mask) sel.value = c.mask || "off";
+  sel.disabled = on;
+  $("capture-mask-hint").innerHTML = c.mask && c.mask !== "off"
+    ? `The subject's face is obscured in the video <b>and</b> the 11 face landmarks are
+       removed from the data. Where no face can be located the whole frame is obscured,
+       so a lost detection cannot leak one.` +
+      (c.maskBlanked ? ` <b>${c.maskBlanked} frames</b> fully obscured so far — detection
+       is dropping out.` : "") +
+      (c.mask === "blur" ? ` <b>Pixelation hides detail but leaves skin tone, head
+       shape and pose</b> — it reduces identifiability rather than removing it. Use
+       "blacked out" if the recording needs to be anonymous.` : "")
+    : (c.wantVideo ? `Recorded video will show the subject's face.` : "");
+  $("capture-intro").hidden = on;
+  $("capture-note").textContent = c.note || "";
+  $("capture-card").querySelector("h2 span").textContent =
+    c.available || on ? "Record this session" : "Record this session — needs cameras";
+}
+
+// Rebuilt only when the set of files changes: replacing the options every
+// frame would reset whatever the user had just selected.
+// null, not "": an empty list is a real state to render ("No recordings
+// yet"), and starting these equal to it would skip that first build.
+let fileSig = null, deriveSig = null, scrubbing = false;
+
+function renderReplay(r) {
+  const open = !!r.open;
+  const files = r.files || [];
+  const sig = files.map(f => `${f.name}:${f.size}`).join("|");
+  if (sig !== fileSig) {
+    fileSig = sig;
+    const keep = $("replay-file").value;
+    $("replay-file").innerHTML = files.length
+      ? files.map(f => {
+          const bits = [f.created ? f.created.replace("T", " ") : "",
+                        MB((f.size || 0) / 1e6), f.note || ""].filter(Boolean);
+          return `<option value="${f.name}" ${f.error ? "disabled" : ""}>` +
+                 `${f.name} — ${f.error ? "unreadable: " + f.error : bits.join(" · ")}</option>`;
+        }).join("")
+      : `<option value="" disabled>No recordings yet</option>`;
+    if (files.some(f => f.name === keep)) $("replay-file").value = keep;
+  }
+  $("replay-file").disabled = !files.length;
+  $("btn-replay-open").disabled = !files.length;
+  $("btn-replay-close").hidden = !open;
+  $("replay-transport").hidden = !open;
+  $("replay-note").textContent = r.note || "";
+  $("replay-head").textContent = open
+    ? `${r.name} — frame ${(r.index ?? 0) + 1} of ${r.frames}` +
+      (r.video ? " · video" : "")
+    : (files.length ? `${files.length} recording${files.length === 1 ? "" : "s"}` : "");
+
+  if (deriveSig !== (r.modes || []).join()) {
+    deriveSig = (r.modes || []).join();
+    const names = { stored: "As recorded", points: "From 3D points", cameras: "Re-triangulate" };
+    $("replay-derive").innerHTML = (r.modes || [])
+      .map(m => `<button data-derive="${m}">${names[m] || m}</button>`).join("");
+  }
+  for (const b of $("replay-derive").querySelectorAll("[data-derive]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.derive === r.derive));
+    // Re-triangulating needs a calibration loaded now, not the one the
+    // recording was made with -- which is the whole point of the mode, and
+    // the reason it can be unavailable when the other two are not.
+    b.disabled = b.dataset.derive === "cameras" && !r.canRetriangulate;
+    b.title = b.disabled ? "No calibration is loaded to re-triangulate with" : "";
+  }
+  $("replay-derive-hint").textContent = open && r.deriveLabel
+    ? `Showing angles ${r.deriveLabel}.` : "";
+
+  if (!open) return;
+  $("btn-replay-play").querySelector("span").textContent = r.playing ? "Pause" : "Play";
+  $("btn-replay-loop").setAttribute("aria-pressed", String(!!r.loop));
+  $("replay-time").textContent = `${clock(r.t)} / ${clock(r.duration)}`;
+  if (!scrubbing) $("replay-scrub").value = Math.round((r.fraction || 0) * 1000);
+
+  const sel = $("replay-speed");
+  const speeds = r.speeds || [1];
+  if (sel.options.length !== speeds.length) {
+    sel.innerHTML = speeds.map(v => `<option value="${v}">${v}×</option>`).join("");
+  }
+  if (Number(sel.value) !== r.speed) sel.value = String(r.speed);
 }
 
 function renderRanges(r) {
@@ -526,9 +717,12 @@ function renderMetrics(metrics) {
 }
 
 function renderStatus(s) {
+  const cap = s.capture || {}, rep = s.replay || {};
   const rows = [
     ...s.cameras.map(c => [c.name, c.pose ? "detecting" : "no pose"]),
     ["Metrics source", s.source],
+    ...(cap.recording ? [["Recording", `${cap.file} — ${cap.frames} frames`]] : []),
+    ...(rep.open ? [["Replaying", `${rep.name} — ${rep.deriveLabel}`]] : []),
     ["Triangulation", s.triangulation.status],
     ["Inferred joints", s.triangulation.trustInferred ? "kept, labelled" : "dropped"],
     ["Calibration", s.triangulation.calibration],
@@ -552,6 +746,36 @@ $("jog").addEventListener("click", (ev) => {
   const b = ev.target.closest("[data-jog]");
   if (b) send(`jog:${b.dataset.jog}:${b.dataset.dir}`);
 });
+$("btn-capture").onclick = () =>
+  send(lastState && lastState.capture && lastState.capture.recording
+       ? "rec-stop" : "rec-start");
+
+$("btn-capture-video").onclick = () => send("rec-video");
+$("capture-mask").onchange = (ev) => send(`rec-mask:${ev.target.value}`);
+$("btn-replay-open").onclick = () => {
+  const name = $("replay-file").value;
+  if (name) send(`replay-load:${name}`);
+};
+$("btn-replay-close").onclick = () => send("replay-close");
+$("btn-replay-play").onclick = () => send("replay-play");
+$("btn-replay-back").onclick = () => send("replay-step:-1");
+$("btn-replay-fwd").onclick = () => send("replay-step:1");
+$("btn-replay-loop").onclick = () => send("replay-loop");
+$("replay-speed").onchange = (ev) => send(`replay-speed:${ev.target.value}`);
+$("replay-derive").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-derive]");
+  if (b && !b.disabled) send(`replay-derive:${b.dataset.derive}`);
+});
+// While a drag is in progress the incoming state is ignored for this
+// control, or every frame would yank the handle back to where playback has
+// got to and make the scrubber impossible to use.
+const scrub = $("replay-scrub");
+scrub.addEventListener("pointerdown", () => { scrubbing = true; });
+scrub.addEventListener("input", () => send(`replay-seek:${scrub.value / 1000}`));
+for (const ev of ["pointerup", "pointercancel", "blur"]) {
+  scrub.addEventListener(ev, () => { scrubbing = false; });
+}
+
 $("btn-views").onclick = () => send("views");
 $("btn-link").onclick = () => send("link");
 $("btn-engage").onclick = () => send("engage");
@@ -563,6 +787,10 @@ $("btn-quit").onclick = () => { if (confirm("Stop the tracker?")) send("quit"); 
 // has both sets of keys, so one letter cannot mean two things.
 const KEYS = { " ": "side", t: "triangulation", i: "trust", v: "views",
                c: "link", e: "engage", r: "disengage", p: "save-pose" };
+// Transport keys, live only while a recording is open. K/J/L is the
+// scrubbing shorthand every video tool uses; the arrows step frames.
+const REPLAY_KEYS = { k: "replay-play", j: "replay-step:-1", l: "replay-step:1",
+                      arrowleft: "replay-step:-1", arrowright: "replay-step:1" };
 const JOG_KEYS = {};
 for (const [joint, , up, down] of JOG_ROWS) {
   JOG_KEYS[up] = `jog:${joint}:+`;
@@ -570,10 +798,16 @@ for (const [joint, , up, down] of JOG_ROWS) {
 }
 addEventListener("keydown", (ev) => {
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  // A keystroke aimed at the file list or the scrubber belongs to that
+  // control, not to the shortcuts -- otherwise arrowing through recordings
+  // steps replay frames instead.
+  const tag = (ev.target.tagName || "").toLowerCase();
+  if (tag === "select" || tag === "input" || tag === "textarea") return;
   const key = ev.key.toLowerCase();
   // Jog keys only while jogging is actually offered, so they cannot fire
   // while engaged -- where the bridge would ignore them anyway.
-  const action = (!$("jog-card").hidden && JOG_KEYS[key]) || KEYS[key];
+  const action = (!$("replay-transport").hidden && REPLAY_KEYS[key])
+    || (!$("jog-card").hidden && JOG_KEYS[key]) || KEYS[key];
   if (!action) return;
   ev.preventDefault();
   send(action);

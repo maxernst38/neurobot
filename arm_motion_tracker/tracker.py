@@ -37,6 +37,17 @@ opened on a phone propped where you can see it (see --web-host). The camera
 feeds and 3D views are still drawn here and streamed as MJPEG -- only the
 text panel is rebuilt as DOM. See webui.py.
 
+`--record` captures the session to a file and `--replay FILE` plays one
+back, both also drivable from the page. A capture keeps what each camera
+saw, not only what was made of it, so it can be re-processed later against a
+new calibration or changed geometry code -- which is what makes it usable as
+research data rather than as a screen recording. See recording.py, and
+--derive for the three ways a replayed frame can be interpreted.
+
+Replay needs no cameras: with `--no-cameras` the tracker opens none and
+serves the page alone, which is how a capture is reviewed on a machine
+nowhere near the rig.
+
 With the robot connected (C), the arm holds wherever it already is -- it
 never moves on its own. Match the pose it is holding (the panel shows how far
 each joint is out, and the 3D views draw it as a ghost arm) and it engages
@@ -58,6 +69,8 @@ import cv2
 import numpy as np
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core.base_options import BaseOptions
+
+import recording
 from mediapipe import Image, ImageFormat
 
 from camera_io import (DEFAULT_CAMERA_INDICES, Camera, fit_scale, is_torn,
@@ -90,7 +103,7 @@ POSE = {
 # counts as positive depends on anatomy this code cannot check for itself.
 # Flip an entry to -1 if a metric reads inverted against a real arm (the same
 # convention main.py uses for JOINT_SIGN).
-METRIC_SIGN = {"wrist_flexion": 1, "wrist_rotation": 1}
+METRIC_SIGN = {"wrist_flexion": 1}
 
 HAND = {
     "WRIST": 0,
@@ -104,11 +117,16 @@ HAND = {
 # Matched (where possible) to the SO-101 joint names used in main.py, so this
 # can feed the same webcam teleop mapping.
 METRICS = [
-    {"key": "shoulder_rotation", "label": "Shoulder Rotation", "unit": "deg", "range": (-180, 180), "highLabel": "Rotated Out", "midLabel": "Neutral", "lowLabel": "Rotated In"},
+    # Heading of the upper arm about the torso, not a rotation of it: zero
+    # is the arm straight out to the side, positive is swung forward. The
+    # range is what a shoulder can reach rather than the +-180 an atan2 can
+    # return, so the display bands mean something and the wrap sits well
+    # outside it. The key keeps its name because it still drives
+    # shoulder_pan; see GEOMETRY_VERSION for why the meaning changed.
+    {"key": "shoulder_rotation", "label": "Shoulder Heading", "unit": "deg", "range": (-45, 135), "highLabel": "Swung Forward", "midLabel": "Half Forward", "lowLabel": "Out to the Side"},
     {"key": "shoulder_flexion", "label": "Shoulder Ext/Flex", "unit": "deg", "range": (0, 180), "highLabel": "Flexed (raised)", "midLabel": "Neutral", "lowLabel": "Extended (lowered)"},
     {"key": "elbow_flexion", "label": "Elbow Ext/Flex", "unit": "deg", "range": (0, 180), "highLabel": "Extended", "midLabel": "Neutral", "lowLabel": "Flexed"},
     {"key": "wrist_flexion", "label": "Wrist Ext/Flex", "unit": "deg", "range": (-90, 90), "highLabel": "Extended", "midLabel": "Neutral", "lowLabel": "Flexed"},
-    {"key": "wrist_rotation", "label": "Wrist Rotation", "unit": "deg", "range": (-180, 180), "highLabel": "Supinated", "midLabel": "Neutral", "lowLabel": "Pronated"},
     {"key": "grip", "label": "Hand Grip", "unit": "", "range": (0, 1), "highLabel": "Gripping", "midLabel": "Half", "lowLabel": "Open"},
 ]
 
@@ -133,6 +151,103 @@ HAND_CONNECTIONS = [
     (0, 17), (17, 18), (18, 19), (19, 20),
     (5, 9), (9, 13), (13, 17),
 ]
+
+
+# Bumped whenever a metric's geometry changes meaning. A recorded human
+# range is a measurement of a *definition*, so one taken under an older
+# definition is not merely stale, it is a wrong gain -- and a wrong gain is
+# an arm that moves further and faster than the person driving it expects.
+# Recordings carry this; main.py refuses a range that does not match.
+#   1: original. shoulder_rotation was the forearm's bearing in camera 1's
+#      axes -- entangled with elbow flexion (measured: 120 deg of elbow
+#      swung it 99.5 deg) and dependent on where the camera sat.
+#   2: shoulder_rotation is the upper arm's heading in a torso frame built
+#      from the hips and shoulders. Zero is the arm straight out to the
+#      side, positive forward.
+GEOMETRY_VERSION = 2
+
+# How far the upper arm must be off the torso's own axis before its heading
+# means anything: 0.20 is about 11.5 degrees from straight down. Below that
+# the horizontal component is small enough that landmark noise dominates the
+# direction entirely.
+HEADING_MIN_HORIZONTAL = 0.20
+
+
+def torso_frame(pose_world):
+    """Right/up/forward unit axes of the torso, or None.
+
+    An anatomical frame, so angles built on it mean the same thing wherever
+    the cameras are put. Needs both hips and both shoulders; returns None
+    rather than guessing when the body is half out of frame, because a
+    frame built from three points and an assumption is worse than no
+    reading at all -- it looks like a measurement.
+    """
+    if not pose_world:
+        return None
+
+    def at(name):
+        p = pose_world[POSE[name]]
+        return None if p is None else np.array([p.x, p.y, (p.z or 0.0)])
+
+    sl, sr = at("LEFT_SHOULDER"), at("RIGHT_SHOULDER")
+    hl, hr = at("LEFT_HIP"), at("RIGHT_HIP")
+    if any(v is None for v in (sl, sr, hl, hr)):
+        return None
+    # y points DOWN in MediaPipe's world convention, so hips-minus-shoulders
+    # is the direction from the chest toward the head.
+    up = (hl + hr) / 2.0 - (sl + sr) / 2.0
+    right = sr - sl
+    if np.linalg.norm(up) < 1e-9 or np.linalg.norm(right) < 1e-9:
+        return None
+    up = up / np.linalg.norm(up)
+    right = right - np.dot(right, up) * up      # square it against the spine
+    if np.linalg.norm(right) < 1e-9:            # shoulders stacked over hips
+        return None
+    right = right / np.linalg.norm(right)
+    forward = np.cross(right, up)
+    n = np.linalg.norm(forward)
+    return (right, up, forward / n) if n > 1e-9 else None
+
+
+def shoulder_heading(pose_world, side):
+    """Where the UPPER arm points, about the torso's vertical axis.
+
+    This is what shoulder_pan can actually follow: swinging the whole arm
+    left and right in front of the body. Zero is the arm straight out to
+    that side, positive is forward across the body.
+
+    Measured from the upper arm and not the forearm. Reading it off the
+    forearm, as this did originally, meant bending the elbow swung the
+    answer while the shoulder never moved -- 99.5 degrees of it over a
+    normal elbow range, which is most of the metric's useful travel.
+
+    Centred on "out to the side" so the +-180 wrap falls behind the back
+    where nobody reaches. Where an angle wraps matters as much as what it
+    measures: a reading that flips sign mid-range is unusable however
+    correct it is.
+    """
+    frame = torso_frame(pose_world)
+    shoulder = pose_world[POSE[f"{side}_SHOULDER"]] if pose_world else None
+    elbow = pose_world[POSE[f"{side}_ELBOW"]] if pose_world else None
+    if frame is None or shoulder is None or elbow is None:
+        return None
+    right, _up, forward = frame
+    upper = np.array([elbow.x - shoulder.x, elbow.y - shoulder.y,
+                      (elbow.z or 0.0) - (shoulder.z or 0.0)])
+    if np.linalg.norm(upper) < 1e-9:
+        return None
+    outward = right if side == "RIGHT" else -right
+    along, across = float(np.dot(upper, forward)), float(np.dot(upper, outward))
+    # An arm hanging straight down has no heading: it lies along the torso's
+    # own axis, so its horizontal part is nearly zero and atan2 of two tiny
+    # numbers is noise that swings through the whole range on landmark
+    # jitter. Report nothing instead. Downstream already treats a missing
+    # metric as "hold the last target", which is exactly right here -- the
+    # alternative is a shoulder_pan command thrashing while the person is
+    # simply standing at rest.
+    if math.hypot(along, across) < HEADING_MIN_HORIZONTAL * np.linalg.norm(upper):
+        return None
+    return math.degrees(math.atan2(along, across))
 
 
 def _vec(a, b):
@@ -204,18 +319,20 @@ def compute_joint_metrics(pose_world, hand_world, side):
 
     out = {
         "shoulder_rotation": None, "shoulder_flexion": None, "elbow_flexion": None,
-        "wrist_flexion": None, "wrist_rotation": None, "grip": None,
+        "wrist_flexion": None, "grip": None,
     }
 
     if shoulder and elbow and wrist:
+        # Rotation-invariant by construction: the angle between two vectors
+        # at the elbow does not care how the arm as a whole is turned. That
+        # is why rotating the shoulder cannot move this reading, and why any
+        # coupling seen between them on a real rig is measurement error
+        # rather than geometry -- see the epipolar note in triangulate_pose.
         out["elbow_flexion"] = _angle_at(shoulder, elbow, wrist)
-        # Axial-rotation proxy: swing angle of the forearm through the depth
-        # (z) axis while the upper arm is roughly fixed. Triangulated, the
-        # depth is measured, so this is a real geometric quantity -- but it
-        # is still expressed in camera 1's axes, so it shifts if you move
-        # that camera. Building a torso frame from the triangulated hips and
-        # shoulders would make it anatomical and camera-independent.
-        out["shoulder_rotation"] = math.degrees(math.atan2(wrist.z - elbow.z, wrist.x - elbow.x))
+
+    # Needs the hips as well as the arm, so it is gated separately: a
+    # torso frame cannot be built from the arm alone.
+    out["shoulder_rotation"] = shoulder_heading(pose_world, side)
 
     if shoulder and elbow and hip:
         out["shoulder_flexion"] = _angle_at(hip, shoulder, elbow)
@@ -233,12 +350,9 @@ def compute_joint_metrics(pose_world, hand_world, side):
             normal = -normal
 
     if normal is not None:
-        # 0 deg = palm facing camera 1, whose optical axis is +z, so negating
-        # z puts the zero there; +-180 is the palm turned fully away, +90 the
-        # palm toward the right of the image.
-        out["wrist_rotation"] = METRIC_SIGN["wrist_rotation"] * math.degrees(
-            math.atan2(normal[0], -normal[2]))
-
+        # The palm normal is still needed -- wrist flexion is measured about
+        # it. What is gone is the bearing that used to be read off it as
+        # "wrist rotation": see the note on wrist_roll in main.py's JOINT_MAP.
         if elbow and wrist:
             # Flexion/extension turns about the side-to-side axis of the
             # wrist. Taking that axis as perpendicular to both the hand's
@@ -535,6 +649,10 @@ def save_arm_ranges(recorder):
         return None, "nothing moved far enough to record"
     payload["recorded"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     payload["samples"] = max((v["n"] for v in recorder.spans().values()), default=0)
+    # Which definitions these numbers measure. Without it, a range recorded
+    # under older geometry loads silently as a gain for an angle that no
+    # longer means the same thing.
+    payload["geometry"] = GEOMETRY_VERSION
     os.makedirs(os.path.dirname(ARM_RANGES_FILE), exist_ok=True)
     with open(ARM_RANGES_FILE, "w") as f:
         json.dump(payload, f, indent=2)
@@ -1037,6 +1155,118 @@ def draw_landmarks(frame, pose, hands):
             cv2.line(frame, to_px(landmarks[a], w, h), to_px(landmarks[b], w, h), (129, 196, 51), 3, cv2.LINE_AA)
 
 
+# --- replay -------------------------------------------------------------------
+
+# How a replayed frame is turned back into readings. Three depths into the
+# same capture, and the reason the raw detections are kept at all:
+#   stored   -- the angles exactly as they were recorded. What the robot was
+#               actually told that day; the only mode whose numbers are not
+#               produced by today's code.
+#   points   -- angles recomputed from the recorded xyz. Tests changed
+#               geometry against an unchanged triangulation.
+#   cameras  -- xyz re-triangulated from the recorded 2D with whatever
+#               calibration is loaded now, then angles from that. Tests a new
+#               calibration, or changed visibility/reprojection gates,
+#               against a capture taken under the old ones.
+DERIVE_MODES = ("stored", "points", "cameras")
+DERIVE_LABELS = {
+    "stored": "as recorded",
+    "points": "angles recomputed from the recorded 3D points",
+    "cameras": "re-triangulated from the recorded camera views",
+}
+
+# Size the replayed camera panes are drawn at. These are line drawings of
+# recorded landmarks, not video, so there is no detail to preserve -- only
+# enough room to see which camera lost the arm.
+REPLAY_PANE = (640, 360)
+
+
+def replay_camera_view(pose_norm, name, index, color, size=REPLAY_PANE, note="",
+                       footage=None):
+    """One camera's recorded detection, drawn as its feed would have been.
+
+    The video itself is not recorded -- it would dwarf everything else in the
+    file and answers no question the landmarks do not. What is worth seeing
+    on replay is exactly what was kept: where each camera put the body, and
+    which one stopped seeing it. Drawn through the same draw_landmarks and
+    flipped the same way, so a replayed pane and a live one can be compared
+    without allowing for a difference in how they were made.
+    """
+    w, h = size
+    if footage is not None:
+        # Landmarks drawn over the frame they were read from, at the
+        # footage's own size, so the two cannot disagree about where the
+        # body was. Scaled down only afterwards, for the same reason the
+        # live path draws before it resizes.
+        view = footage if footage.shape[1] <= w else cv2.resize(
+            footage, (w, round(footage.shape[0] * w / footage.shape[1])),
+            interpolation=cv2.INTER_AREA)
+        h = view.shape[0]
+    else:
+        view = np.zeros((h, w, 3), np.uint8)
+        view[:] = (18, 16, 14)
+    if pose_norm:
+        draw_landmarks(view, pose_norm, [None, None])
+    view = cv2.flip(view, 1)
+    cv2.rectangle(view, (0, 0), (w, 22), (0, 0, 0), -1)
+    cv2.putText(view, f"{name}  (index {index})", (8, 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+    label = note or (("REPLAY" if footage is not None else "REPLAY - landmarks only")
+                     if pose_norm else "REPLAY - no pose recorded")
+    cv2.putText(view, label, (w - 8 - 7 * len(label), 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                MUTED if pose_norm else STATE_LOW, 1, cv2.LINE_AA)
+    return view
+
+
+def derive_replay_frame(rec, index, mode, calibration, min_visibility,
+                        max_reproj_px, trust_inferred, side):
+    """Turn one recorded frame back into (points, info, raw metrics).
+
+    Returns raw, unsmoothed metrics: smoothing is stateful and belongs to the
+    caller's classifier, so that replaying at 4x or stepping frame by frame
+    filters the same sequence the live loop would have.
+    """
+    frame = rec.frames[index]
+    if mode == "cameras" and calibration:
+        poses = rec.poses_norm(index)
+        if len(poses) == 2 and all(p is not None for p in poses):
+            points, info = triangulate_pose(
+                calibration, poses, rec.sizes(), min_visibility=min_visibility,
+                max_reproj_px=max_reproj_px, trust_inferred=trust_inferred)
+            hand = rec.hand(index)
+            return points, info, compute_joint_metrics(points, hand, side)
+        # Fall through: a frame where a camera saw nothing cannot be
+        # re-triangulated, and silently showing the stored answer instead
+        # would misreport which mode produced the number.
+        return None, rec.info(index), {}
+    points, info = rec.points(index), rec.info(index)
+    if mode == "stored":
+        return points, info, {k: v for k, v in (frame.get("m") or {}).items()}
+    return points, info, compute_joint_metrics(points, rec.hand(index), side)
+
+
+def replay_results(classifier, raw, smooth):
+    """Band-classify replayed metrics, smoothing only when they are raw.
+
+    The stored values were already smoothed once, when they were recorded;
+    running them through the filter again would show a reading the live
+    session never produced, and would make "as recorded" the one mode that
+    does not report what was recorded. Banding still runs either way, since
+    that is presentation rather than filtering -- so the pass-through is a
+    smoothing factor of 1.0 rather than a separate code path that could drift
+    from the real one.
+    """
+    if smooth:
+        return classifier.update(raw)
+    saved = classifier.smoothing
+    classifier.smoothing = 1.0
+    try:
+        return classifier.update(raw)
+    finally:
+        classifier.smoothing = saved
+
+
 # The reading shown beside each joint in the 3D views: (landmark, metric,
 # prefix). One number per joint so the views stay readable -- the panel
 # carries the full set of six. The prefix matters because in some poses two
@@ -1460,6 +1690,7 @@ class CameraPipeline:
         self.pose_world = None     # this camera's own monocular estimate
         self.hand_world = None     # still needed: grip has no triangulated form
         self.results = None
+        self.raw = {}              # unsmoothed, for recordings
 
     def read(self):
         """Grab one frame. Capture itself lives in camera_io.Camera so this
@@ -1497,6 +1728,9 @@ class CameraPipeline:
         # feed's overlay shows, and because it is the fallback when the two
         # cameras cannot agree on a pose at all.
         raw = compute_joint_metrics(self.pose_world, hand_world, side)
+        # Kept unsmoothed as well: a recording stores both, so a capture can
+        # be re-filtered offline without the classifier's state baked in.
+        self.raw = raw
         self.results = self.classifier.update(raw)
 
         drawn_hands = [
@@ -1538,6 +1772,17 @@ JOG_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex",
 WEB_VIEWS_HZ = 8
 WEB_VIEWS_W = 960
 
+# How often the recordings directory is re-listed for the page. Disk I/O in
+# the capture loop, and the only thing that changes it mid-session is a
+# recording this process just finished writing.
+LISTING_EVERY_S = 3.0
+
+# How many frames of history are replayed through the filter before a frame
+# that was jumped to, so it reads the same as it did live. The smoothing
+# factor is 0.35, so after 20 frames 0.65**20 = 0.02% of whatever the filter
+# held before the jump survives -- below the rounding the value is shown at.
+REPLAY_PRIME_FRAMES = 20
+
 KEY_ACTIONS = {
     ord("q"): "quit", 27: "quit", ord(" "): "side", ord("t"): "triangulation",
     ord("v"): "views", ord("c"): "link", ord("e"): "engage", ord("d"): "disengage",
@@ -1547,7 +1792,8 @@ KEY_ACTIONS = {
 
 def build_web_state(results, side, source, fps, robot_link, tri_status,
                     calib_status, tri_available, tri_enabled, tri_live,
-                    cams, show_views, joints=(), trust_inferred=False, ranges=None):
+                    cams, show_views, joints=(), trust_inferred=False, ranges=None,
+                    cameras=None, capture=None, replay=None):
     """Everything the browser page renders as text, as plain JSON.
 
     Deliberately the same numbers build_panel draws, from the same dicts, so
@@ -1580,7 +1826,16 @@ def build_web_state(results, side, source, fps, robot_link, tri_status,
         # Human range-of-motion recording: the counterpart of the robot's
         # --recalibrate, for the other end of the map.
         "ranges": ranges or {},
-        "cameras": [{
+        # Session capture and playback. Both are always present so the page
+        # can offer recording before anything has been recorded, and can
+        # offer to open a file with no cameras attached at all.
+        "capture": capture or {},
+        "replay": replay or {},
+        # A replayed frame describes the cameras of the recording, which may
+        # be nothing like the ones attached now -- or attached at all -- so
+        # the caller may supply the list rather than it being read off the
+        # live pipelines.
+        "cameras": cameras if cameras is not None else [{
             "name": c.name,
             "index": c.index,
             "stream": f"cam{i}",
@@ -1667,29 +1922,96 @@ def main():
                         help="keep every joint instead of dropping the ones that fail the "
                              "visibility or reprojection gate; they are labelled as inferred "
                              "rather than discarded (also toggleable with I)")
+    # --- recording and replay ---
+    parser.add_argument("--record", action="store_true",
+                        help="start recording the session to a file immediately")
+    parser.add_argument("--record-name", metavar="NAME",
+                        help="filename for --record (default: session-<timestamp>.jsonl)")
+    parser.add_argument("--record-note", default="",
+                        help="free-text note stored in the recording's header, "
+                             "e.g. what the session was testing")
+    # Measured at ~8.8 MB/min uncompressed and ~0.44 MB/min gzipped, so the
+    # saving is real. It is not the default because an interrupted plain file
+    # is readable with any tool, which for a capture someone stood up to
+    # produce is worth more than the disk.
+    parser.add_argument("--record-compress", action="store_true",
+                        help="gzip the recording (~20x smaller, ~0.4 MB/min)")
+    # Off by default: it is most of the bytes. What it buys is the one thing
+    # landmarks cannot give back -- the pose model can be re-run on the raw
+    # frames, where stored landmarks are already that model's answer.
+    parser.add_argument("--record-video", action="store_true",
+                        help="also keep each camera's raw frames as video next to the "
+                             "recording (~15-40 MB/min per camera; also toggleable on the page)")
+    # Identity protection for recorded subjects. 'block' paints the head out
+    # solid and is the one to use for that purpose. 'blur' pixelates and
+    # smooths instead, which keeps the frame readable -- but it measurably
+    # destroys only the fine detail: skin tone, head shape and pose all
+    # survive it, so it reduces identifiability rather than removing it.
+    # Either mode also strips the face landmarks from the stored data, since
+    # eleven facial coordinates per frame beside a masked video would
+    # protect nobody.
+    parser.add_argument("--mask-face", choices=recording.MASK_MODES, default="off",
+                        help="obscure the subject's face in recorded video and drop the "
+                             "face landmarks from the data. 'block' blacks the head out "
+                             "and is what to use for anonymity; 'blur' pixelates it, "
+                             "which hides detail but leaves skin tone and head shape, "
+                             "so it is NOT anonymisation; 'off' (default) keeps faces.")
+    parser.add_argument("--video-codec", default="avc1",
+                        help="fourcc for --record-video (avc1/H.264 default; "
+                             "mp4v and XVID are ~2x larger, MJPG far larger)")
+    parser.add_argument("--recordings", default=recording.RECORDINGS_DIR,
+                        help="directory recordings are written to and listed from")
+    parser.add_argument("--replay", metavar="FILE",
+                        help="play a recording back instead of the live cameras; "
+                             "a bare filename is looked up in --recordings")
+    parser.add_argument("--derive", choices=DERIVE_MODES, default="points",
+                        help="how a replayed frame is interpreted: 'stored' shows the "
+                             "angles as recorded, 'points' recomputes them from the "
+                             "recorded 3D, 'cameras' re-triangulates from the recorded "
+                             "2D with the current calibration")
+    # Replaying on a machine with no rig attached is the normal case for
+    # reviewing a capture, and opening cameras that are not there costs
+    # seconds of timeouts before failing.
+    parser.add_argument("--no-cameras", action="store_true",
+                        help="don't open any camera; serve the UI for replay only")
     parser.add_argument("--dump-canvas", metavar="PATH",
                         help="save the composed window to PATH and exit (for diagnosing display problems)")
     args = parser.parse_args()
 
-    pose_model = ensure_model(POSE_MODEL_URL, os.path.join(MODEL_DIR, "pose_landmarker_lite.task"))
-    hand_model = ensure_model(HAND_MODEL_URL, os.path.join(MODEL_DIR, "hand_landmarker.task"))
-    delegate = BaseOptions.Delegate.GPU if args.delegate == "GPU" else BaseOptions.Delegate.CPU
+    # Reviewing a capture is normally done on a machine nowhere near the rig,
+    # so --replay opens no cameras: waiting out the driver timeouts for two
+    # that are not plugged in would be the slowest part of starting up. To
+    # watch a recording while the cameras run, load it from the page instead.
+    no_cameras = args.no_cameras or bool(args.replay)
+    if no_cameras and not args.web and not args.dump_canvas:
+        args.web = True
+        print("No cameras to open, so the UI is served in a browser (--web).")
 
     specs = [(args.camera, "CAM 1 front")]
     if args.camera2 >= 0:
         specs.append((args.camera2, "CAM 2 side"))
-    devices = open_cameras(specs, args.width, args.height,
-                           force_mjpg=not args.raw_format, fps=args.fps)
-    metrics_index = min(args.metrics_cam, len(devices)) - 1
-    cams = [
-        CameraPipeline(dev, name, CAM_COLORS[i], pose_model, hand_model, delegate,
-                       hands=args.hands == "all"
-                       or (args.hands == "metrics" and i == metrics_index))
-        for i, (dev, (_, name)) in enumerate(zip(devices, specs))
-    ]
+    cams = []
+    metrics_index = 0
+    if not no_cameras:
+        pose_model = ensure_model(POSE_MODEL_URL, os.path.join(MODEL_DIR, "pose_landmarker_lite.task"))
+        hand_model = ensure_model(HAND_MODEL_URL, os.path.join(MODEL_DIR, "hand_landmarker.task"))
+        delegate = BaseOptions.Delegate.GPU if args.delegate == "GPU" else BaseOptions.Delegate.CPU
+        devices = open_cameras(specs, args.width, args.height,
+                               force_mjpg=not args.raw_format, fps=args.fps)
+        metrics_index = min(args.metrics_cam, len(devices)) - 1
+        cams = [
+            CameraPipeline(dev, name, CAM_COLORS[i], pose_model, hand_model, delegate,
+                           hands=args.hands == "all"
+                           or (args.hands == "metrics" and i == metrics_index))
+            for i, (dev, (_, name)) in enumerate(zip(devices, specs))
+        ]
 
     frame_sizes = [c.camera.size for c in cams]
-    calibration = load_calibration(args.calibration, frame_sizes) if len(cams) > 1 else None
+    # Without cameras there is no capture resolution to adapt the intrinsics
+    # to, so they load unscaled; a recording carries its own sizes and the
+    # calibration is re-adapted to those when one is loaded.
+    calibration = (load_calibration(args.calibration, frame_sizes or None)
+                   if len(cams) > 1 or no_cameras else None)
     if calibration:
         rep = calibration["report"]
         calib_status = f"loaded ({rep.get('stereo_rms_px', float('nan')):.2f} px RMS)"
@@ -1706,7 +2028,7 @@ def main():
         print(f"No calibration at {args.calibration} (tracking still works; "
               f"triangulation will need it).")
 
-    metrics_cam = cams[metrics_index]
+    metrics_cam = cams[metrics_index] if cams else None
     robot_link = RobotLink()
     side = args.side
     show_views = not args.no_views
@@ -1735,12 +2057,16 @@ def main():
     if args.robot:
         robot_link.connect(f"ws://{args.robot_host}/ws")
 
-    print(f"Running {len(cams)} independent pipeline(s): " + ", ".join(f"{c.name}={c.index}" for c in cams))
-    print(f"Metrics panel and robot output follow {metrics_cam.name}.")
-    without = [c.name for c in cams if c.hand_landmarker is None]
-    if without:
-        print(f"Hand model off for {', '.join(without)} (--hands all to enable). "
-              f"{'Grip is disabled.' if args.hands == 'off' else 'Grip still comes from ' + metrics_cam.name + '.'}")
+    if cams:
+        print(f"Running {len(cams)} independent pipeline(s): "
+              + ", ".join(f"{c.name}={c.index}" for c in cams))
+        print(f"Metrics panel and robot output follow {metrics_cam.name}.")
+        without = [c.name for c in cams if c.hand_landmarker is None]
+        if without:
+            print(f"Hand model off for {', '.join(without)} (--hands all to enable). "
+                  f"{'Grip is disabled.' if args.hands == 'off' else 'Grip still comes from ' + metrics_cam.name + '.'}")
+    else:
+        print("No cameras opened. Load a recording from the page to review one.")
     if web:
         print(f"\nOpen the tracker UI at {web.url}")
         if args.web_host not in ("127.0.0.1", "localhost"):
@@ -1764,6 +2090,258 @@ def main():
     trust_inferred = args.trust_inferred
     tri_reproj_ema = None
     pool = ThreadPoolExecutor(max_workers=len(cams)) if len(cams) > 1 else None
+
+    # Two different recorders, and they record different things: `recorder`
+    # above measures how far each of your joints travels, to calibrate the
+    # map, and keeps only the extremes. `session` here keeps every frame, to
+    # be replayed and re-analysed later.
+    session = recording.Recorder(directory=args.recordings)
+    session_note = ""
+    session_t0 = 0.0
+    session_video = None        # VideoRecorder while capturing footage
+    want_video = args.record_video
+    mask_mode = args.mask_face
+    player = None
+    replay_video = None         # VideoSource while replaying one that has it
+    replay_calib = None
+    replay_classifier = JointStateClassifier()
+    derive_mode = args.derive
+    replay_note = ""
+    replay_cam_state = []
+    replay_last = None       # frame index the classifier's state belongs to
+    replay_cache = None
+    listing = recording.list_recordings(args.recordings)
+    last_listing = 0.0
+
+    def invalidate_replay():
+        """Forget the filter state, so the next frame rebuilds its history."""
+        nonlocal replay_last, replay_cache
+        replay_classifier.reset()
+        replay_last, replay_cache = None, None
+
+    def replay_frame(idx):
+        """(points, info, results) for one replayed frame, filtered as live.
+
+        Smoothing is a running filter, so the reading for a frame depends on
+        the frames before it. Two things break that on replay, and both show
+        up as a scrubbed frame disagreeing with what the same frame read
+        live -- which would make the whole point of the derive modes
+        (comparing stored readings against recomputed ones) meaningless,
+        since the difference would be filter history rather than code.
+
+        Jumping: after a seek, a step, or playback at 4x skipping frames,
+        the filter holds state from somewhere else entirely. So the frames
+        just before the target are pushed through it first.
+
+        Holding: while paused the loop keeps running, and re-filtering the
+        same frame 30 times a second walks the smoothed value steadily
+        toward the raw one -- a paused reading would visibly drift. So a
+        frame is derived once and reused until the index actually moves.
+        """
+        nonlocal replay_last, replay_cache
+        if idx == replay_last and replay_cache is not None:
+            return replay_cache
+
+        def derive(j):
+            return derive_replay_frame(
+                player.recording, j, derive_mode, replay_calib or calibration,
+                args.min_visibility, args.max_reproj, trust_inferred, side)
+
+        smooth = derive_mode != "stored"
+        if replay_last is None or not 0 < idx - replay_last <= 1:
+            replay_classifier.reset()
+            for j in range(max(0, idx - REPLAY_PRIME_FRAMES), idx):
+                replay_results(replay_classifier, derive(j)[2], smooth)
+        points, info, raw = derive(idx)
+        replay_cache = (points, info,
+                        replay_results(replay_classifier, raw, smooth))
+        replay_last = idx
+        return replay_cache
+
+    def session_header():
+        """Provenance for a capture: enough to interpret it without this code.
+
+        The calibration report goes in whole rather than by reference,
+        because the file it came from is the one thing most likely to have
+        been replaced by the time anyone reads the recording back -- and a
+        capture whose geometry cannot be identified is not evidence of
+        anything.
+        """
+        shape = [{"name": c.name, "index": c.index, "size": list(c.camera.size),
+                  "hands": c.hand_landmarker is not None} for c in cams]
+        return recording.build_header(
+            side=side,
+            cameras=shape or [{"name": c[1], "index": c[0], "size": []} for c in specs],
+            metrics=METRICS, landmark_names=POSE,
+            calibration_report=(calibration or {}).get("report"),
+            calibration_path=args.calibration,
+            video=({"files": session_video.paths, "codec": args.video_codec,
+                    "fps": args.fps, "sizes": [list(c.camera.size) for c in cams],
+                    "faceMask": mask_mode}
+                   if session_video else None),
+            privacy={"faceMask": mask_mode,
+                     "faceLandmarksRemoved": mask_mode != "off",
+                     "faceLandmarkIndices": list(recording.FACE_LANDMARKS)},
+            settings={
+                "min_visibility": args.min_visibility,
+                "max_reproj": args.max_reproj,
+                "trust_inferred": trust_inferred,
+                "hands": args.hands,
+                "metrics_cam": metrics_cam.name if metrics_cam else None,
+                "fps_requested": args.fps,
+            },
+            note=args.record_note)
+
+    def session_action(name):
+        """Start or stop capturing this session. Returns a status line."""
+        nonlocal session_t0, session_video, want_video, mask_mode
+        if name.startswith("rec-mask:"):
+            mode = name.split(":", 1)[1]
+            if mode not in recording.MASK_MODES:
+                return session_note
+            if session.active:
+                return ("Already recording — stop first to change face masking. "
+                        "Changing it mid-capture would leave one file with two "
+                        "different privacy guarantees.")
+            mask_mode = mode
+            return {"off": "Faces will NOT be masked.",
+                    "block": "Faces will be blacked out, and face landmarks dropped.",
+                    "blur": "Faces will be pixelated, and face landmarks dropped. "
+                            "Pixelation leaves skin tone and head shape, so it is "
+                            "not anonymisation — use 'blacked out' for that."}[mode]
+        if name == "rec-video":
+            # Footage is decided when a capture opens its files, so this is
+            # a preference for the next one rather than a live switch.
+            if session.active:
+                return ("Already recording — stop first to change whether "
+                        "footage is kept.")
+            want_video = not want_video
+            return ("The next recording will keep the raw video too."
+                    if want_video else "The next recording will keep landmarks only.")
+        if name == "rec-start":
+            if session.active:
+                return session_note
+            # The filename is fixed first, because the video files are named
+            # after it and the header has to name them in turn.
+            base = args.record_name or f"session-{time.strftime('%Y%m%d-%H%M%S')}"
+            note = ""
+            if want_video and cams:
+                session_video = recording.VideoRecorder(
+                    os.path.join(args.recordings, base),
+                    [c.camera.size for c in cams], fps=args.fps,
+                    codec=args.video_codec, mask=mask_mode)
+                try:
+                    os.makedirs(args.recordings, exist_ok=True)
+                    session_video.start()
+                except OSError as exc:
+                    # A missing codec must not cost the capture itself --
+                    # the landmarks are the part that cannot be re-made.
+                    session_video = None
+                    note = (f" Video is off: {exc}. Try --video-codec mp4v.")
+            try:
+                path = session.start(session_header(), name=base,
+                                     compress=args.record_compress)
+            except OSError as exc:
+                if session_video:
+                    session_video.stop()
+                    session_video = None
+                return f"Could not start recording: {exc}"
+            session_t0 = time.monotonic()
+            kept = (f" with video ({', '.join(session_video.paths)})"
+                    if session_video else "")
+            return f"Recording to {os.path.basename(path)}{kept}.{note}"
+        # rec-stop
+        path = session.stop()
+        vid = session_video.stop() if session_video else None
+        session_video = None
+        if not path:
+            return session_note
+        size = os.path.getsize(path) / 1e6 if os.path.exists(path) else 0
+        if vid:
+            here = os.path.dirname(path)
+            size += sum(os.path.getsize(os.path.join(here, f)) / 1e6
+                        for f in vid["files"] if os.path.exists(os.path.join(here, f)))
+        lost = sum(vid["dropped"]) if vid else 0
+        return (f"Saved {os.path.basename(path)} — {session.frames} frames, "
+                f"{session.elapsed:.0f}s, {size:.1f} MB"
+                + (f" including video" if vid else "")
+                + (f"; {lost} video frames dropped under load" if lost else "") + ".")
+
+    def load_replay(name):
+        """Open a recording for playback. Returns a status line."""
+        nonlocal player, replay_calib, derive_mode, replay_video
+        path = name if os.path.isabs(name) else os.path.join(args.recordings, name)
+        try:
+            rec = recording.Recording.load(path)
+        except (OSError, ValueError) as exc:
+            return f"Cannot open {os.path.basename(path)}: {exc}"
+        if not rec.count:
+            return f"{rec.name} has no frames."
+        player = recording.Player(rec)
+        if replay_video:
+            replay_video.close()
+        # Footage lives in separate files beside the .jsonl, so it may not
+        # have travelled with it. A recording without its video is still a
+        # recording; it just replays as the stick figure.
+        replay_video = rec.open_video()
+        invalidate_replay()
+        # Intrinsics belong to the resolution they were captured at, so a
+        # recording made at a different size than the cameras currently
+        # report needs its own adaptation -- otherwise re-triangulation is
+        # done with a focal length for the wrong frame.
+        sizes = rec.sizes()
+        replay_calib = (load_calibration(args.calibration, sizes)
+                        if all(s and len(s) == 2 and all(s) for s in sizes) and len(sizes) == 2
+                        else calibration)
+        if derive_mode == "cameras" and not replay_calib:
+            derive_mode = "points"
+        player.play()
+        return (f"Playing {rec.name} — {rec.count} frames, {rec.duration:.1f}s "
+                f"at {rec.fps:.0f} fps, {rec.header.get('side', '?')} arm.")
+
+    def replay_action(name):
+        """Transport controls for the loaded recording."""
+        nonlocal player, derive_mode, replay_calib, replay_video
+        if name.startswith("replay-load:"):
+            return load_replay(name.split(":", 1)[1])
+        if name == "replay-close":
+            player = None
+            replay_calib = None
+            if replay_video:
+                replay_video.close()
+                replay_video = None
+            invalidate_replay()
+            return "Replay closed." if cams else "Replay closed. No cameras are running."
+        if name.startswith("replay-derive:"):
+            mode = name.split(":", 1)[1]
+            if mode not in DERIVE_MODES:
+                return replay_note
+            if mode == "cameras" and not (replay_calib or calibration):
+                return "No calibration loaded, so the camera views cannot be re-triangulated."
+            derive_mode = mode
+            invalidate_replay()
+            return f"Showing angles {DERIVE_LABELS[mode]}."
+        if player is None:
+            return replay_note
+        if name == "replay-play":
+            player.toggle()
+            return replay_note
+        if name == "replay-loop":
+            player.loop = not player.loop
+            return replay_note
+        # Parsed defensively: these carry a number from the page, and a
+        # malformed one must not take down a loop that may be holding a
+        # robot arm.
+        try:
+            if name.startswith("replay-seek:"):
+                player.seek_fraction(float(name.split(":", 1)[1]))
+            elif name.startswith("replay-step:"):
+                player.step(int(name.split(":", 1)[1]))
+            elif name.startswith("replay-speed:"):
+                player.set_speed(float(name.split(":", 1)[1]))
+        except ValueError:
+            return f"Ignored a malformed replay command: {name}"
+        return replay_note
 
     def record_action(name):
         """Range recording: start, stop, save, clear. Returns a status line."""
@@ -1801,7 +2379,7 @@ def main():
         this loop may own. Returns False to stop the loop.
         """
         nonlocal side, use_triangulation, show_views, scale, window_sized
-        nonlocal trust_inferred
+        nonlocal trust_inferred, session_note, replay_note
         if name == "quit":
             return False
         if name == "side":
@@ -1809,6 +2387,7 @@ def main():
             for cam in cams:
                 cam.classifier.reset()
             tri_classifier.reset()
+            invalidate_replay()
             print(f"Tracking side: {side}")
         elif name == "triangulation" and calibration:
             use_triangulation = not use_triangulation
@@ -1817,6 +2396,9 @@ def main():
         elif name == "trust":
             trust_inferred = not trust_inferred
             tri_classifier.reset()
+            # Re-triangulation reads this gate, so a replayed frame derived
+            # under the old setting is no longer what this setting produces.
+            invalidate_replay()
             print(f"inferred joints {'kept' if trust_inferred else 'dropped'}")
         elif name == "views":
             show_views = not show_views
@@ -1831,6 +2413,13 @@ def main():
         elif name.startswith("range-"):
             range_note = record_action(name)
             print(range_note)
+        elif name.startswith("rec-"):
+            session_note = session_action(name)
+            print(session_note)
+        elif name.startswith("replay-"):
+            replay_note = replay_action(name)
+            if replay_note:
+                print(replay_note)
         elif name.startswith("jog:") and robot_link.is_connected:
             # "jog:<joint>:<+|->", forwarded to main.py, which owns the arm
             # and every limit on it. Validated here too so a stray action
@@ -1846,52 +2435,108 @@ def main():
             robot_link.request(name)
         return True
 
+    if args.record:
+        session_note = session_action("rec-start")
+        print(session_note)
+    if args.replay:
+        replay_note = load_replay(args.replay)
+        print(replay_note)
+        if player is None:
+            raise SystemExit(replay_note)
+
     try:
         while True:
             loop_start = time.perf_counter()
+            replaying = player is not None
 
-            # Capture first, both cameras concurrently, so neither driver
-            # queue waits on the other's inference and the two frames are as
-            # close together in time as free-running cameras allow -- every
-            # millisecond between them is arm displacement that triangulation
-            # sees as disagreement. Only then run the models, also in parallel:
-            # MediaPipe releases the GIL during native inference, which is
-            # worth ~1.6x on two cameras.
-            raw = read_all([cam.camera for cam in cams])
-            frames = (list(pool.map(lambda cf: cf[0].process(cf[1], side), zip(cams, raw)))
-                      if pool else [cams[0].process(raw[0], side)])
-            # The two cameras need not agree on a resolution -- they have
-            # different maximum modes, and each may fall back independently.
-            # Detection has already run at full resolution, so matching them
-            # here is purely so the panes can sit side by side.
-            if frames and all(f is not None for f in frames):
-                h_min = min(f.shape[0] for f in frames)
-                frames = [f if f.shape[0] == h_min else
-                          cv2.resize(f, (round(f.shape[1] * h_min / f.shape[0]), h_min),
-                                     interpolation=cv2.INTER_AREA)
-                          for f in frames]
-            if any(f is None for f in frames):
-                print("A camera stopped delivering frames.")
-                break
+            if replaying:
+                # A replayed frame replaces the whole capture stage: no
+                # cameras are read and no model runs. What each camera saw is
+                # redrawn from the recorded landmarks, so the panes still show
+                # which view lost the arm -- the one thing about a capture
+                # worth looking at that the numbers do not say.
+                idx = player.tick()
+                tri_points, tri_info, replay_results_now = replay_frame(idx)
+                rec_cams = player.recording.header.get("cameras", [])
+                poses = player.recording.poses_norm(idx)
+                at = player.recording.video_index(idx) or []
+                frames = [
+                    replay_camera_view(poses[i] if i < len(poses) else None,
+                                       c.get("name", f"cam{i + 1}"), c.get("index", i),
+                                       CAM_COLORS[i % len(CAM_COLORS)],
+                                       footage=(replay_video.frame(i, at[i])
+                                                if replay_video and i < len(at) else None))
+                    for i, c in enumerate(rec_cams)
+                ] if rec_cams else []
+                replay_cam_state = [{
+                    "name": c.get("name", f"cam{i + 1}"),
+                    "index": c.get("index", i),
+                    "stream": f"cam{i}",
+                    "size": list(c.get("size") or REPLAY_PANE),
+                    "health": "from the recording",
+                    "stale": 0,
+                    "pose": bool(poses[i]) if i < len(poses) else False,
+                } for i, c in enumerate(rec_cams)]
+            elif cams:
+                # Capture first, both cameras concurrently, so neither driver
+                # queue waits on the other's inference and the two frames are as
+                # close together in time as free-running cameras allow -- every
+                # millisecond between them is arm displacement that triangulation
+                # sees as disagreement. Only then run the models, also in parallel:
+                # MediaPipe releases the GIL during native inference, which is
+                # worth ~1.6x on two cameras.
+                raw = read_all([cam.camera for cam in cams])
+                frames = (list(pool.map(lambda cf: cf[0].process(cf[1], side), zip(cams, raw)))
+                          if pool else [cams[0].process(raw[0], side)])
+                # The two cameras need not agree on a resolution -- they have
+                # different maximum modes, and each may fall back independently.
+                # Detection has already run at full resolution, so matching them
+                # here is purely so the panes can sit side by side.
+                if frames and all(f is not None for f in frames):
+                    h_min = min(f.shape[0] for f in frames)
+                    frames = [f if f.shape[0] == h_min else
+                              cv2.resize(f, (round(f.shape[1] * h_min / f.shape[0]), h_min),
+                                         interpolation=cv2.INTER_AREA)
+                              for f in frames]
+                if any(f is None for f in frames):
+                    print("A camera stopped delivering frames.")
+                    break
+            else:
+                # No cameras and nothing loaded: the page is up so a recording
+                # can be opened from it. Idle at a low rate rather than
+                # spinning a core on an empty loop.
+                frames = []
+                time.sleep(0.05)
 
             # Triangulate from the two views. This supersedes the per-camera
             # monocular estimates when it succeeds, because its depth is
             # measured rather than inferred.
-            tri_points, tri_info = (None, None)
-            if calibration and len(cams) == 2:
-                tri_points, tri_info = triangulate_pose(
-                    calibration,
-                    [c.pose_norm for c in cams],
-                    [c.camera.size for c in cams],
-                    min_visibility=args.min_visibility,
-                    max_reproj_px=args.max_reproj,
-                    trust_inferred=trust_inferred,
-                )
+            if not replaying:
+                tri_points, tri_info = (None, None)
+                if calibration and len(cams) == 2:
+                    tri_points, tri_info = triangulate_pose(
+                        calibration,
+                        [c.pose_norm for c in cams],
+                        [c.camera.size for c in cams],
+                        min_visibility=args.min_visibility,
+                        max_reproj_px=args.max_reproj,
+                        trust_inferred=trust_inferred,
+                    )
 
-            source = metrics_cam.name
-            results = metrics_cam.results
             triangulated = False
-            if tri_points and use_triangulation:
+            frame_raw = {}
+            if replaying:
+                results = replay_results_now
+                triangulated = tri_points is not None
+                source = f"REPLAY · {DERIVE_LABELS[derive_mode]}"
+            elif not cams:
+                results = replay_classifier.update({})
+                source = "no cameras"
+            else:
+                source = metrics_cam.name
+                results = metrics_cam.results
+                frame_raw = metrics_cam.raw
+            if tri_points and use_triangulation and not replaying:
                 triangulated = True
                 # Five of the six metrics now come entirely from the
                 # triangulated points. Only grip still needs the hand model,
@@ -1899,8 +2544,30 @@ def main():
                 # finger joints, and grip is a ratio along each finger, so it
                 # is the metric least troubled by monocular depth anyway.
                 tri_raw = compute_joint_metrics(tri_points, metrics_cam.hand_world, side)
+                frame_raw = tri_raw
                 results = tri_classifier.update(tri_raw)
                 source = "TRIANGULATED"
+
+            # Capture, if recording. Only ever the live path: re-recording a
+            # replay would write a file derived from another one, which looks
+            # identical afterwards and is not a measurement of anything.
+            if session.active and not replaying and cams:
+                # The RAW frames, before draw_landmarks and the mirror flip:
+                # burnt-in overlays are exactly what would stop the footage
+                # being re-runnable through a pose model later.
+                video_at = (session_video.add(raw, [c.pose_norm for c in cams])
+                            if session_video else None)
+                session.add(recording.build_frame(
+                    index=session.frames, t=time.monotonic() - session_t0,
+                    points=tri_points, info=tri_info, results=results,
+                    raw=frame_raw, poses_norm=[c.pose_norm for c in cams],
+                    hand_world=metrics_cam.hand_world if metrics_cam else None,
+                    triangulated=triangulated, source=source,
+                    stale=[c.camera.stale_frames for c in cams],
+                    video=video_at, drop_face=mask_mode != "off"))
+                if session.error:
+                    session_note = f"Recording stopped: {session.error}"
+                    print(session_note)
 
             recorder.update(results)
             active = [
@@ -1910,7 +2577,16 @@ def main():
             if tri_info and tri_info.get("reproj") is not None:
                 r = tri_info["reproj"]
                 tri_reproj_ema = r if tri_reproj_ema is None else 0.9 * tri_reproj_ema + 0.1 * r
-            if not calibration:
+            if replaying:
+                # During replay this line describes the recording, not the
+                # rig: the cameras it names may not even be plugged in.
+                tri_status = (f"{tri_info['n_valid']}/33 joints from the recording"
+                              if tri_points and tri_info else
+                              (tri_info or {}).get("reason") or "no points in this frame")
+            elif not cams:
+                # Not a failure to report: there is nothing attached to fail.
+                tri_status = "idle - no cameras"
+            elif not calibration:
                 tri_status = calib_status
             elif not use_triangulation:
                 tri_status = "off (press T)"
@@ -1928,7 +2604,7 @@ def main():
             robot_link.poll()
             # The browser renders all of this as text from the state feed, so
             # there is nothing to draw -- and nothing to squeeze into 430px.
-            panel = None if web else build_panel(
+            panel = None if web or not frames else build_panel(
                 frames[0].shape[0], results, active, robot_link.status,
                 title=f"METRICS - {source}", fps=fps_ema,
                 calib_status=tri_status,
@@ -1967,7 +2643,7 @@ def main():
                         and robot_state.get("state") in ("HOMING", "READY")):
                     ghost = ghost_arm_points(tri_points, side, results, robot_state.get("errors"))
                 return build_pose_views(width, VIEW_ROW_H,
-                                        tri_points if use_triangulation else None,
+                                        tri_points if (use_triangulation or replaying) else None,
                                         side, metrics=results, status=tri_status, ghost=ghost)
 
             if web:
@@ -1986,19 +2662,62 @@ def main():
                         and loop_start - last_views >= 1.0 / WEB_VIEWS_HZ):
                     last_views = loop_start
                     web.publish_frame("views", make_views(WEB_VIEWS_W))
+                if loop_start - last_listing >= LISTING_EVERY_S:
+                    # Re-read the directory on a timer, not every frame: it
+                    # is disk I/O in the capture loop, and the only thing
+                    # that changes it is a recording this process just made.
+                    last_listing = loop_start
+                    listing = recording.list_recordings(args.recordings)
                 web.publish_state(build_web_state(
                     results, side, source, fps_ema, robot_link,
                     tri_status=tri_status, calib_status=calib_status,
                     tri_available=calibration is not None,
                     tri_enabled=use_triangulation, tri_live=triangulated,
                     cams=cams, show_views=show_views, trust_inferred=trust_inferred,
+                    cameras=replay_cam_state if replaying else None,
                     ranges={"recording": recorder.active,
                             "seconds": round(recorder.elapsed, 1),
                             "note": range_note,
                             "file": os.path.basename(ARM_RANGES_FILE),
                             "spans": recorder.spans()},
+                    capture={"recording": session.active,
+                             "file": os.path.basename(session.path or ""),
+                             "frames": session.frames,
+                             "seconds": round(session.elapsed, 1),
+                             "megabytes": round(session.bytes_written / 1e6, 2),
+                             "note": session_note,
+                             "available": bool(cams) and not replaying,
+                             "directory": args.recordings,
+                             "wantVideo": want_video,
+                             "video": bool(session_video),
+                             "videoFiles": session_video.paths if session_video else [],
+                             "videoDropped": (sum(session_video.dropped)
+                                              if session_video else 0),
+                             "maskModes": list(recording.MASK_MODES),
+                             "mask": mask_mode,
+                             # Frames where no face could be located and the
+                             # whole frame was obscured instead. A rising
+                             # count means detection is dropping out, which
+                             # is worth seeing while you can still fix it.
+                             "maskBlanked": (sum(session_video.blanked)
+                                             if session_video else 0)},
+                    replay={"open": replaying,
+                            "note": replay_note,
+                            "video": bool(replay_video),
+                            "derive": derive_mode,
+                            "deriveLabel": DERIVE_LABELS[derive_mode],
+                            "modes": list(DERIVE_MODES),
+                            "canRetriangulate": bool(replay_calib or calibration),
+                            "speeds": list(recording.Player.SPEEDS),
+                            "files": listing,
+                            **(player.state() if player else {})},
+                    # Per-landmark diagnosis only when something is actually
+                    # producing landmarks. With no cameras attached it would
+                    # report every joint as "no pose detected", which reads
+                    # as a rig that is failing rather than one that is absent.
                     joints=joint_diagnosis(tri_info, side, args.min_visibility,
-                                           args.max_reproj) if calibration else ()))
+                                           args.max_reproj)
+                           if (replaying or (calibration and cams)) else ()))
                 if not all(do_action(a) for a in web.take_commands()):
                     break
                 dt = time.perf_counter() - loop_start
@@ -2046,6 +2765,13 @@ def main():
         # instead of the process being killed for not finishing in time.
         print("\nStopping the tracker...")
     finally:
+        if session.active:
+            # Whatever stopped the loop -- Q, Ctrl+C, a camera dying -- the
+            # frames already captured are worth more than the tidy exit, so
+            # the file is closed properly before anything else is torn down.
+            print(session_action("rec-stop"))
+        if replay_video:
+            replay_video.close()
         if pool:
             pool.shutdown()
         if web:
