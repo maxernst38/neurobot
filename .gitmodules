@@ -1,0 +1,8 @@
+[submodule "lerobot"]
+	path = lerobot
+	url = https://github.com/Seeed-Projects/lerobot.git
+	branch = main
+[submodule "Seeed_RoboController"]
+	path = Seeed_RoboController
+	url = https://github.com/Seeed-Projects/Seeed_RoboController.git
+	branch = factory

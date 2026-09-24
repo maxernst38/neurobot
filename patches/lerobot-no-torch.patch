@@ -1,0 +1,164 @@
+diff --git a/src/lerobot/robots/robot.py b/src/lerobot/robots/robot.py
+index d165886..c466c30 100644
+--- a/src/lerobot/robots/robot.py
++++ b/src/lerobot/robots/robot.py
+@@ -12,18 +12,29 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++# LOCAL PATCH (capstone_project) -- RobotAction and RobotObservation are
++# imported for type checking only. Both are plain `TypeAlias = dict[str, Any]`
++# (see processor/core.py) and appear here solely in annotations, but importing
++# them at runtime pulls in lerobot.processor, which is built on torch. That
++# made driving a servo over a serial port depend on the whole ML stack.
++# See the note at the top of lerobot/utils/utils.py. Re-apply if updating.
++from __future__ import annotations
++
+ import abc
+ import builtins
+ from pathlib import Path
++from typing import TYPE_CHECKING
+ 
+ import draccus
+ 
+ from lerobot.motors import MotorCalibration
+-from lerobot.processor import RobotAction, RobotObservation
+ from lerobot.utils.constants import HF_LEROBOT_CALIBRATION, ROBOTS
+ 
+ from .config import RobotConfig
+ 
++if TYPE_CHECKING:
++    from lerobot.processor import RobotAction, RobotObservation
++
+ 
+ # TODO(aliberts): action/obs typing such as Generic[ObsType, ActType] similar to gym.Env ?
+ # https://github.com/Farama-Foundation/Gymnasium/blob/3287c869f9a48d99454306b0d4b4ec537f0f35e3/gymnasium/core.py#L23
+diff --git a/src/lerobot/robots/so_follower/so_follower.py b/src/lerobot/robots/so_follower/so_follower.py
+index b4d11fe..9ace527 100644
+--- a/src/lerobot/robots/so_follower/so_follower.py
++++ b/src/lerobot/robots/so_follower/so_follower.py
+@@ -14,10 +14,16 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++# LOCAL PATCH (capstone_project) -- RobotAction and RobotObservation are
++# imported for type checking only; they are used here purely in annotations,
++# and importing them at runtime pulls lerobot.processor and therefore torch.
++# See the note at the top of lerobot/utils/utils.py. Re-apply if updating.
++from __future__ import annotations
++
+ import logging
+ import time
+ from functools import cached_property
+-from typing import TypeAlias
++from typing import TYPE_CHECKING, TypeAlias
+ 
+ from lerobot.cameras.utils import make_cameras_from_configs
+ from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+@@ -25,11 +31,13 @@ from lerobot.motors.feetech import (
+     FeetechMotorsBus,
+     OperatingMode,
+ )
+-from lerobot.processor import RobotAction, RobotObservation
+ from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+ 
+ from ..robot import Robot
+ from ..utils import ensure_safe_goal_position
++
++if TYPE_CHECKING:
++    from lerobot.processor import RobotAction, RobotObservation
+ from .config_so_follower import SOFollowerRobotConfig
+ 
+ logger = logging.getLogger(__name__)
+diff --git a/src/lerobot/utils/utils.py b/src/lerobot/utils/utils.py
+index c7ad2bb..9fdfd00 100644
+--- a/src/lerobot/utils/utils.py
++++ b/src/lerobot/utils/utils.py
+@@ -13,6 +13,19 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++#
++# LOCAL PATCH (capstone_project) -- torch, accelerate and datasets are imported
++# lazily inside the functions that use them, instead of at module scope.
++#
++# lerobot.motors.motors_bus imports exactly two names from this file,
++# enter_pressed and move_cursor_up, and both are pure stdlib. At module scope
++# those three imports made talking to a servo depend on the entire ML stack --
++# and on Windows, on the MSVC runtime, which torch's DLLs need and a stock
++# Python install does not have. Nothing on the motors path calls any of them.
++#
++# Re-apply this if the vendored lerobot checkout is ever updated.
++from __future__ import annotations
++
+ import logging
+ import os
+ import platform
+@@ -24,11 +37,14 @@ from copy import copy, deepcopy
+ from datetime import datetime
+ from pathlib import Path
+ from statistics import mean
++from typing import TYPE_CHECKING
+ 
+ import numpy as np
+-import torch
+-from accelerate import Accelerator
+-from datasets.utils.logging import disable_progress_bar, enable_progress_bar
++
++# Annotation-only, so it never has to exist at runtime -- `from __future__
++# import annotations` above keeps every annotation a string.
++if TYPE_CHECKING:
++    from accelerate import Accelerator
+ 
+ 
+ def inside_slurm():
+@@ -39,6 +55,8 @@ def inside_slurm():
+ 
+ def auto_select_torch_device() -> torch.device:
+     """Tries to select automatically a torch device."""
++    import torch
++
+     if torch.cuda.is_available():
+         logging.info("Cuda backend detected, using cuda.")
+         return torch.device("cuda")
+@@ -56,6 +74,8 @@ def auto_select_torch_device() -> torch.device:
+ # TODO(Steven): Remove log. log shouldn't be an argument, this should be handled by the logger level
+ def get_safe_torch_device(try_device: str, log: bool = False) -> torch.device:
+     """Given a string, return a torch.device with checks on whether the device is available."""
++    import torch
++
+     try_device = str(try_device)
+     if try_device.startswith("cuda"):
+         assert torch.cuda.is_available()
+@@ -81,6 +101,8 @@ def get_safe_dtype(dtype: torch.dtype, device: str | torch.device):
+     """
+     mps is currently not compatible with float64
+     """
++    import torch
++
+     if isinstance(device, torch.device):
+         device = device.type
+     if device == "mps" and dtype == torch.float64:
+@@ -105,6 +127,8 @@ def get_safe_dtype(dtype: torch.dtype, device: str | torch.device):
+ 
+ 
+ def is_torch_device_available(try_device: str) -> bool:
++    import torch
++
+     try_device = str(try_device)  # Ensure try_device is a string
+     if try_device.startswith("cuda"):
+         return torch.cuda.is_available()
+@@ -297,9 +321,13 @@ class SuppressProgressBars:
+     """
+ 
+     def __enter__(self):
++        from datasets.utils.logging import disable_progress_bar
++
+         disable_progress_bar()
+ 
+     def __exit__(self, exc_type, exc_val, exc_tb):
++        from datasets.utils.logging import enable_progress_bar
++
+         enable_progress_bar()
+ 
+ 
