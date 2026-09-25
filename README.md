@@ -57,7 +57,15 @@ Tracker plus the robot bridge:
 
 ```bash
 python run_teleop.py
+python run_teleop.py --no-robot        # cameras only, no arm attached
+python run_teleop.py --num-cameras 1   # one camera
 ```
+
+`--num-cameras` takes 2 (the default, and what triangulation needs), 1, or 0.
+With one camera there is nothing to triangulate, so depth comes from
+MediaPipe's monocular guess rather than from measurement — usable for
+gestures, unreliable for anything needing real depth. With 0 the tracker opens
+no cameras at all and serves the UI for replaying recordings.
 
 Recalibrate the robot's motor ranges:
 

@@ -10,6 +10,8 @@ itself. This just saves opening two terminals.
     python run_teleop.py                    # auto-detect the serial port
     python run_teleop.py --port COM3 --fps 60
     python run_teleop.py --window           # old OpenCV popup instead of the page
+    python run_teleop.py --no-robot         # cameras only, no arm attached
+    python run_teleop.py --num-cameras 1    # one camera (no triangulation)
 
 The tracker serves its UI at http://localhost:8080/ -- open that once both
 processes are up. Pass --web-host 0.0.0.0 to reach it from another device on
@@ -108,6 +110,15 @@ def main():
     parser.add_argument("--side", choices=["LEFT", "RIGHT"], help="arm to track")
     parser.add_argument("--camera", type=int, help="index of the front camera")
     parser.add_argument("--camera2", type=int, help="index of the side camera")
+    parser.add_argument("--num-cameras", type=int, choices=[0, 1, 2],
+                        metavar="N",
+                        help="how many cameras to open: 2 (default), 1, or 0")
+    # Tracking without the arm: checking calibration, recording a session to
+    # replay later, or working on the camera side while the robot is packed
+    # away. The tracker is the half that runs standalone -- main.py exists to
+    # hold the arm, so there is nothing to start without one.
+    parser.add_argument("--no-robot", action="store_true",
+                        help="run only the tracker, without starting the robot bridge")
     parser.add_argument("--no-views", action="store_true", help="hide the 3D projections")
     parser.add_argument("--trust-inferred", action="store_true",
                         help="triangulate every joint, labelling rather than dropping the "
@@ -136,11 +147,12 @@ def main():
         if getattr(args, flag):
             robot_cmd += [f"--{flag}", str(getattr(args, flag))]
 
-    tracker_cmd = [sys.executable, "-u", TRACKER,
-                   "--robot", "--robot-host", f"localhost:{WS_PORT}"]
-    for flag in ("fps", "side", "camera", "camera2", "hands"):
+    tracker_cmd = [sys.executable, "-u", TRACKER]
+    if not args.no_robot:
+        tracker_cmd += ["--robot", "--robot-host", f"localhost:{WS_PORT}"]
+    for flag in ("fps", "side", "camera", "camera2", "num_cameras", "hands"):
         if getattr(args, flag) is not None:
-            tracker_cmd += [f"--{flag}", str(getattr(args, flag))]
+            tracker_cmd += [f"--{flag.replace('_', '-')}", str(getattr(args, flag))]
     if args.no_views:
         tracker_cmd.append("--no-views")
     if args.trust_inferred:
@@ -157,7 +169,7 @@ def main():
 
     web_port = None if args.window else (args.web_port or 8080)
 
-    if bridge_is_up(WS_PORT):
+    if not args.no_robot and bridge_is_up(WS_PORT):
         raise SystemExit(
             f"Something is already listening on port {WS_PORT} -- most likely a main.py\n"
             f"from an earlier run. Stop it before starting another."
@@ -165,23 +177,30 @@ def main():
 
     robot = tracker = None
     try:
-        print("Starting the robot bridge...")
-        robot = subprocess.Popen(robot_cmd, cwd=HERE)
-        if not wait_for_bridge(robot, WS_PORT):
-            raise SystemExit(f"\nThe robot bridge exited ({robot.returncode}) before it "
-                             f"started listening. See its output above.")
-
-        print(f"\nBridge is up on {WS_PORT}. Starting the tracker...\n")
+        if args.no_robot:
+            print("Starting the tracker only (--no-robot); the arm is not being "
+                  "driven.\n")
+        else:
+            print("Starting the robot bridge...")
+            robot = subprocess.Popen(robot_cmd, cwd=HERE)
+            if not wait_for_bridge(robot, WS_PORT):
+                raise SystemExit(f"\nThe robot bridge exited ({robot.returncode}) before it "
+                                 f"started listening. See its output above.")
+            print(f"\nBridge is up on {WS_PORT}. Starting the tracker...\n")
         tracker = subprocess.Popen(tracker_cmd, cwd=HERE)
 
         # Whichever stops first, stop the other -- a tracker with no robot, or
-        # an engaged robot with no tracker, is never what you wanted.
+        # an engaged robot with no tracker, is never what you wanted. With
+        # --no-robot there is only the tracker to wait on.
         while True:
-            if robot.poll() is not None:
+            if robot is not None and robot.poll() is not None:
                 print(f"\nRobot bridge exited ({robot.returncode}); stopping the tracker.")
                 break
             if tracker.poll() is not None:
-                print(f"\nTracker exited ({tracker.returncode}); stopping the robot bridge.")
+                if robot is None:
+                    print(f"\nTracker exited ({tracker.returncode}).")
+                else:
+                    print(f"\nTracker exited ({tracker.returncode}); stopping the robot bridge.")
                 break
             time.sleep(0.3)
     except KeyboardInterrupt:
@@ -214,7 +233,7 @@ def main():
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-        print("Both stopped.")
+        print("Stopped." if robot is None else "Both stopped.")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 import urllib.request
 from collections import namedtuple
@@ -1973,7 +1974,15 @@ def main():
     # reviewing a capture, and opening cameras that are not there costs
     # seconds of timeouts before failing.
     parser.add_argument("--no-cameras", action="store_true",
-                        help="don't open any camera; serve the UI for replay only")
+                        help="don't open any camera; serve the UI for replay only "
+                             "(same as --num-cameras 0)")
+    # The plain way to say how many cameras are plugged in. The older way was
+    # to give --camera2 -1, which reads like an index rather than an absence.
+    # Both still work; this one is authoritative when given.
+    parser.add_argument("--num-cameras", type=int, choices=[0, 1, 2], default=None,
+                        metavar="N",
+                        help="how many cameras to open: 2 (default, needed to "
+                             "triangulate), 1 for a single monocular view, 0 for none")
     parser.add_argument("--dump-canvas", metavar="PATH",
                         help="save the composed window to PATH and exit (for diagnosing display problems)")
     args = parser.parse_args()
@@ -1982,13 +1991,31 @@ def main():
     # so --replay opens no cameras: waiting out the driver timeouts for two
     # that are not plugged in would be the slowest part of starting up. To
     # watch a recording while the cameras run, load it from the page instead.
-    no_cameras = args.no_cameras or bool(args.replay)
+    # --num-cameras is the authoritative count when given. Contradicting it
+    # with an explicit index is a mistake worth stopping on rather than
+    # silently resolving: either answer would be a guess at which the person
+    # meant, and guessing wrong here means opening the wrong camera or
+    # triangulating from one view.
+    if args.num_cameras is not None:
+        if args.num_cameras < 2 and args.camera2 >= 0 and "--camera2" in sys.argv:
+            raise SystemExit(
+                f"--num-cameras {args.num_cameras} and --camera2 {args.camera2} "
+                f"contradict each other. Drop one.")
+        if args.num_cameras == 0 and "--camera" in sys.argv:
+            raise SystemExit("--num-cameras 0 opens no cameras, so --camera has "
+                             "nothing to name. Drop one.")
+        want_cameras = args.num_cameras
+    else:
+        # The original spelling: a negative index means "there isn't one".
+        want_cameras = 2 if args.camera2 >= 0 else 1
+
+    no_cameras = args.no_cameras or bool(args.replay) or want_cameras == 0
     if no_cameras and not args.web and not args.dump_canvas:
         args.web = True
         print("No cameras to open, so the UI is served in a browser (--web).")
 
     specs = [(args.camera, "CAM 1 front")]
-    if args.camera2 >= 0:
+    if want_cameras >= 2:
         specs.append((args.camera2, "CAM 2 side"))
     cams = []
     metrics_index = 0
@@ -2023,6 +2050,15 @@ def main():
                 print(f"  NOTE: {cam['name']} calibrated at {cam['calib_size'][0]}x{cam['calib_size'][1]} "
                       f"but capturing at {size[0]}x{size[1]}; intrinsics rescaled, which assumes "
                       f"the camera keeps the same field of view. Prefer matching resolutions.")
+    elif len(cams) == 1:
+        # Not a missing calibration -- a calibration cannot help here. Saying
+        # "run calibrate_cameras.py" would send someone off to fix something
+        # that is not broken, when the actual limit is one camera.
+        calib_status = "one camera - no triangulation"
+        print("Running with one camera, so there is nothing to triangulate: depth "
+              "comes\nfrom MediaPipe's monocular guess rather than from measurement. "
+              "Angles will\nbe usable for gestures and unreliable for anything needing "
+              "real depth.")
     else:
         calib_status = "none - run calibrate_cameras.py"
         print(f"No calibration at {args.calibration} (tracking still works; "
