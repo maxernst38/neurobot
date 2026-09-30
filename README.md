@@ -5,26 +5,58 @@ triangulate the pose in 3D, and drive a LeRobot SO-101 follower arm from the
 measured joint angles. Developed alongside an EMG-based control path as a
 capstone project.
 
-## Setup
+## Setup: from a fresh machine to teleop with one camera
 
-The two vendored dependencies are git submodules, so clone recursively:
+Every command runs from a terminal: PowerShell on Windows, Terminal on macOS
+and Linux. Where the platforms differ, the step shows a block for each.
+Everywhere else the same commands work on all three.
 
-```bash
-git clone --recurse-submodules <this repo>
-cd capstone_project
+### 1. Install Python 3.12 and git
+
+Use **Python 3.10, 3.11 or 3.12**. lerobot pins `torch<2.8.0`, and there are
+no builds of those torch versions for Python 3.13 or later. On a newer Python,
+`pip install -e lerobot` fails with
+`No matching distribution found for torch`, and running anything afterwards
+fails with `No module named 'lerobot.robots'`.
+
+Windows (PowerShell):
+
+```powershell
+winget install Python.Python.3.12
+winget install Git.Git
 ```
 
-Already cloned without `--recurse-submodules`? Fetch them with:
+Close and reopen PowerShell afterwards so it picks up the new commands.
+
+macOS (with [Homebrew](https://brew.sh)):
 
 ```bash
-git submodule update --init
+brew install python@3.12 git
 ```
 
-### Apply the lerobot patch
+Linux (Debian/Ubuntu):
 
-`lerobot` needs one local patch before it will run here. Without it, importing
-the robot driver pulls in torch — and on Windows, the MSVC runtime that torch's
-DLLs need and a stock Python install does not have.
+```bash
+sudo apt install git python3.12 python3.12-venv
+sudo usermod -aG dialout $USER    # lets you open the arm's serial port
+```
+
+Log out and back in for the `dialout` group to take effect. Ubuntu 22.04 has
+no `python3.12` package: install `python3.10 python3.10-venv` instead, and
+write `python3.10` wherever the steps below say `python3.12`.
+
+### 2. Clone the repo
+
+```bash
+git clone --recurse-submodules https://github.com/maxernst38/neurobot.git
+cd neurobot
+```
+
+lerobot and Seeed_RoboController are git submodules, which is why the clone
+needs `--recurse-submodules`. If you already cloned without it, fetch them
+with `git submodule update --init`.
+
+### 3. Apply the lerobot patch
 
 ```bash
 cd lerobot
@@ -32,14 +64,84 @@ git apply ../patches/lerobot-no-torch.patch
 cd ..
 ```
 
-See [patches/README.md](patches/README.md) for what it changes and why.
+Do this once per clone. Without the patch, importing the robot driver pulls in
+torch. On Windows, torch's DLLs also need an MSVC runtime that a stock Python
+install doesn't have. See [patches/README.md](patches/README.md) for what the
+patch changes.
 
-### Install
+### 4. Create and activate a virtual environment
+
+Windows (PowerShell):
+
+```powershell
+py -3.12 -m venv neurobot
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned    # once per machine; answer Y
+.\neurobot\Scripts\Activate.ps1
+```
+
+PowerShell won't run scripts until you change the execution policy, and that
+includes the venv's activation script.
+
+macOS / Linux:
 
 ```bash
+python3.12 -m venv neurobot
+source neurobot/bin/activate
+```
+
+Your prompt now starts with `(neurobot)`. In every new terminal, `cd` into the
+repo and run the activation line again before doing anything else.
+
+### 5. Install the dependencies
+
+With the venv active:
+
+```bash
+python -m pip install --upgrade pip
 pip install -e lerobot
 pip install -r arm_motion_tracker/requirements.txt
 ```
+
+The first install downloads torch, so it takes a while.
+
+### 6. Connect the hardware and check the arm
+
+Plug in one webcam. Plug the arm in over USB and switch on its power supply.
+Then:
+
+```bash
+python main.py --check
+```
+
+This finds the arm's serial port, confirms every motor responds, and reports
+whether the arm is calibrated. It doesn't move the arm. If it can't pick a
+port, it lists the ones it found. Pass the right one with `--port`, e.g.
+`--port COM3` on Windows, `--port /dev/ttyACM0` on Linux, or
+`--port /dev/tty.usbmodem...` on macOS. Use the same `--port` in step 7.
+
+### 7. Run teleop with one camera
+
+```bash
+python run_teleop.py --num-cameras 1
+```
+
+- **First run on an uncalibrated arm:** the terminal walks you through
+  lerobot's motor calibration before anything else starts. Follow its prompts.
+- Open <http://localhost:8080/> in a browser.
+- Press `C` to connect to the arm. Line your arm up with the yellow ghost pose
+  in the 3D view, then press `E` to engage and `R` to release.
+- Press `Ctrl+C` in the terminal to stop. That shuts down both processes and
+  lets the arm go limp.
+
+If the wrong webcam opens, pick one by index with `--camera 1`. On macOS, the
+first run asks for camera access for your terminal. Allow it, or turn it on
+under System Settings → Privacy & Security → Camera. To try the tracker
+without the arm, add `--no-robot`.
+
+With one camera, depth is MediaPipe's estimate rather than a measurement, so
+it's fine for gestures but unreliable for anything that needs real depth. Two
+calibrated cameras measure depth properly. See
+[Calibrating the cameras](#calibrating-the-cameras).
 
 ## Running
 
