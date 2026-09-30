@@ -9,3 +9,7 @@ figures/
 # data alongside the repo, not inside it -- and archive the ones that matter
 # deliberately rather than by accident.
 recordings/
+
+lerobot/bin/
+neurobot/bin/
+neurobot/lib/
