@@ -2,8 +2,8 @@
 
 OpenCV window replacement for the old browser app (index.html/main.js/motion.js/
 robotLink.js). Same MediaPipe models, same joint-angle geometry, same six
-tracked metrics, and the same websocket wire format to main.py's
-`--input webcam` bridge, so main.py needs no changes.
+tracked metrics, and the same websocket wire format to robot.py's
+`--input webcam` bridge, so robot.py needs no changes.
 
 Layout: a top row of one annotated feed per camera plus the metrics panel,
 over a row of front/side/top orthographic projections. Each camera runs its
@@ -103,7 +103,7 @@ POSE = {
 # Both signed metrics are geometrically well defined, but which direction
 # counts as positive depends on anatomy this code cannot check for itself.
 # Flip an entry to -1 if a metric reads inverted against a real arm (the same
-# convention main.py uses for JOINT_SIGN).
+# convention robot.py uses for JOINT_SIGN).
 METRIC_SIGN = {"wrist_flexion": 1}
 
 HAND = {
@@ -115,7 +115,7 @@ HAND = {
     "PINKY_MCP": 17, "PINKY_PIP": 18, "PINKY_DIP": 19, "PINKY_TIP": 20,
 }
 
-# Matched (where possible) to the SO-101 joint names used in main.py, so this
+# Matched (where possible) to the SO-101 joint names used in robot.py, so this
 # can feed the same webcam teleop mapping.
 METRICS = [
     # Heading of the upper arm about the torso, not a rotation of it: zero
@@ -158,7 +158,7 @@ HAND_CONNECTIONS = [
 # range is a measurement of a *definition*, so one taken under an older
 # definition is not merely stale, it is a wrong gain -- and a wrong gain is
 # an arm that moves further and faster than the person driving it expects.
-# Recordings carry this; main.py refuses a range that does not match.
+# Recordings carry this; robot.py refuses a range that does not match.
 #   1: original. shoulder_rotation was the forearm's bearing in camera 1's
 #      axes -- entangled with elbow flexion (measured: 120 deg of elbow
 #      swung it 99.5 deg) and dependent on where the camera sat.
@@ -353,7 +353,7 @@ def compute_joint_metrics(pose_world, hand_world, side):
     if normal is not None:
         # The palm normal is still needed -- wrist flexion is measured about
         # it. What is gone is the bearing that used to be read off it as
-        # "wrist rotation": see the note on wrist_roll in main.py's JOINT_MAP.
+        # "wrist rotation": see the note on wrist_roll in robot.py's JOINT_MAP.
         if elbow and wrist:
             # Flexion/extension turns about the side-to-side axis of the
             # wrist. Taking that axis as perpendicular to both the hand's
@@ -567,7 +567,7 @@ RANGE_MAX_SAMPLES = 20000
 class RangeRecorder:
     """Measures the span each metric actually covers, for one person.
 
-    JOINT_MAP's human ranges in main.py are declarations about a generic
+    JOINT_MAP's human ranges in robot.py are declarations about a generic
     arm -- every one that is wrong is a wrong gain, so a joint saturates
     before you reach the end of your own reach, or never gets near the
     robot's limit. This is the human-side counterpart of the robot's
@@ -632,12 +632,12 @@ class RangeRecorder:
         return out
 
     def recorded(self):
-        """The spans that passed, in the shape main.py reads."""
+        """The spans that passed, in the shape robot.py reads."""
         return {key: [round(v["lo"], 3), round(v["hi"], 3)]
                 for key, v in self.spans().items() if v["ok"]}
 
 
-# Must match main.py; a span under these is a gain high enough to throw a
+# Must match robot.py; a span under these is a gain high enough to throw a
 # joint across its travel on a degree of arm movement.
 MIN_HUMAN_SPAN_DEG = 20.0
 MIN_GRIP_SPAN = 0.15
@@ -663,7 +663,7 @@ def save_arm_ranges(recorder):
 # --- robot link (port of robotLink.js) ---------------------------------------
 
 class RobotLink:
-    """Websocket client for main.py's `--input webcam` control bridge.
+    """Websocket client for robot.py's `--input webcam` control bridge.
 
     Sends continuous joint angles at ~15 Hz rather than the three-band
     high/mid/low classification it used to: the bands threw away almost
@@ -1485,7 +1485,7 @@ def draw_alignment(panel, y, robot_state):
                     font, 0.42, MUTED, 1, cv2.LINE_AA)
     y += 16
     # Whatever the robot last said -- including why it refused to engage.
-    # This used to go only to main.py's console, which is not the screen you
+    # This used to go only to robot.py's console, which is not the screen you
     # are looking at while holding a pose in front of the cameras.
     for line in wrap_text(robot_state.get("message") or "", font, 0.4, PANEL_W - 24)[:2]:
         cv2.putText(panel, line, (12, y), font, 0.4, ACCENT, 1, cv2.LINE_AA)
@@ -1763,8 +1763,8 @@ class CameraPipeline:
             self.hand_landmarker.close()
 
 
-# Jog targets the page may name. Must match main.py's ARM_JOINTS + gripper;
-# main.py validates them again, since it is the one holding the arm.
+# Jog targets the page may name. Must match robot.py's ARM_JOINTS + gripper;
+# robot.py validates them again, since it is the one holding the arm.
 JOG_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex",
               "wrist_flex", "wrist_roll", "gripper")
 
@@ -1871,7 +1871,7 @@ def main():
     parser.add_argument("--side", choices=["LEFT", "RIGHT"], default="RIGHT", help="initially tracked arm")
     parser.add_argument("--metrics-cam", type=int, choices=[1, 2], default=1,
                         help="which camera's estimate drives the metrics panel and the robot")
-    parser.add_argument("--robot-host", default="localhost:8765", help="host:port of main.py --input webcam")
+    parser.add_argument("--robot-host", default="localhost:8765", help="host:port of robot.py --input webcam")
     parser.add_argument("--robot", action="store_true", help="connect to the robot bridge on startup")
     parser.add_argument("--delegate", choices=["CPU", "GPU"], default="CPU", help="MediaPipe inference delegate")
     # Four model invocations per frame on two cameras is the bulk of the
@@ -2457,7 +2457,7 @@ def main():
             if replay_note:
                 print(replay_note)
         elif name.startswith("jog:") and robot_link.is_connected:
-            # "jog:<joint>:<+|->", forwarded to main.py, which owns the arm
+            # "jog:<joint>:<+|->", forwarded to robot.py, which owns the arm
             # and every limit on it. Validated here too so a stray action
             # name never reaches the bridge as a joint it has to reject.
             _, joint, direction = name.split(":", 2)
@@ -2467,7 +2467,7 @@ def main():
             robot_link.save_pose()
         elif name in ("engage", "disengage") and robot_link.is_connected:
             # The engage handshake is driven from the UI you are looking at
-            # while you line yourself up, not from main.py's terminal.
+            # while you line yourself up, not from robot.py's terminal.
             robot_link.request(name)
         return True
 
@@ -2796,7 +2796,7 @@ def main():
                 break
     except KeyboardInterrupt:
         # Ctrl+C reaches every process sharing this console, so this is the
-        # normal way run_teleop.py stops the tracker. Taking the same exit
+        # normal way main.py stops the tracker. Taking the same exit
         # path as Q means the cameras and the robot link close properly
         # instead of the process being killed for not finishing in time.
         print("\nStopping the tracker...")

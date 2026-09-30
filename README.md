@@ -110,7 +110,7 @@ Plug in one webcam. Plug the arm in over USB and switch on its power supply.
 Then:
 
 ```bash
-python main.py --check
+python robot.py --check
 ```
 
 This finds the arm's serial port, confirms every motor responds, and reports
@@ -122,7 +122,7 @@ port, it lists the ones it found. Pass the right one with `--port`, e.g.
 ### 7. Run teleop with one camera
 
 ```bash
-python run_teleop.py --num-cameras 1
+python main.py --num-cameras 1
 ```
 
 - **First run on an uncalibrated arm:** the terminal walks you through
@@ -145,23 +145,19 @@ calibrated cameras measure depth properly. See
 
 ## Running
 
-Tracker alone, in a browser (no robot needed):
+`main.py` is the entry point: it starts the robot bridge (`robot.py`) and the
+camera tracker (`arm_motion_tracker/tracker.py`) together, and stops both on
+Ctrl+C.
 
 ```bash
-python arm_motion_tracker/tracker.py --web
+python main.py
+python main.py --no-robot        # cameras only, no arm attached
+python main.py --num-cameras 1   # one camera
 ```
 
 Then open <http://localhost:8080/>. The page binds to localhost by default
 because it commands a robot arm; `--web-host 0.0.0.0` is the deliberate opt-in
 for reaching it from another device.
-
-Tracker plus the robot bridge:
-
-```bash
-python run_teleop.py
-python run_teleop.py --no-robot        # cameras only, no arm attached
-python run_teleop.py --num-cameras 1   # one camera
-```
 
 `--num-cameras` takes 2 (the default, and what triangulation needs), 1, or 0.
 With one camera there is nothing to triangulate, so depth comes from
@@ -169,10 +165,18 @@ MediaPipe's monocular guess rather than from measurement — usable for
 gestures, unreliable for anything needing real depth. With 0 the tracker opens
 no cameras at all and serves the UI for replaying recordings.
 
+Either half also runs on its own, which is what to do when you are working on
+that half. The tracker needs no robot:
+
+```bash
+python arm_motion_tracker/tracker.py --web
+python robot.py                  # arm only, jogged from the keyboard
+```
+
 Recalibrate the robot's motor ranges:
 
 ```bash
-python main.py --recalibrate
+python robot.py --recalibrate
 ```
 
 ## Recording sessions
@@ -184,10 +188,36 @@ what that measured (joint angles). Keeping the raw detections is what lets an
 old capture be re-processed against a new calibration or corrected code.
 
 ```bash
-python arm_motion_tracker/tracker.py --web --record --record-note "trial 3"
-python arm_motion_tracker/tracker.py --web --record --record-video   # + raw footage
-python arm_motion_tracker/tracker.py --web --record --mask-face block  # anonymise
+python main.py --record --record-note "trial 3"
+python main.py --record --record-video              # + raw footage
+python main.py --record --mask-face block           # anonymise
+python main.py --record --record-compress           # ~20x smaller on disk
 ```
+
+`main.py` passes every `--record*` flag through to the tracker, so the same
+capture works with the arm attached or with `--no-robot`. Recording can also
+be started and stopped from the page mid-session, and
+`python arm_motion_tracker/tracker.py --web --record` records the tracker on
+its own.
+
+Play one back:
+
+```bash
+python main.py --replay session-<stamp>.jsonl
+python main.py --replay session-<stamp>.jsonl --derive cameras
+```
+
+`--replay` implies `--no-robot` and opens no cameras, so a capture is reviewed
+on whatever machine you have rather than at the rig. The page gains a
+transport: scrub, play/pause (`K`), step a frame either way, 0.25x–4x, loop. A
+recording can also be opened from the page mid-session, which is the way to
+watch one while the cameras are still running.
+
+`--derive` chooses how a replayed frame is read — `stored` as it was recorded,
+`points` recomputed from the recorded 3D, `cameras` re-triangulated from the
+recorded 2D with the calibration loaded now. It defaults to `points`, and the
+three are switchable on the page while a replay is open; see
+[Using the web tool](#using-the-web-tool).
 
 Inspect one without starting the tracker:
 
@@ -333,7 +363,7 @@ silently misapplied — a stale span is a wrong gain, and too large a gain is an
 arm that crosses its travel on a small movement of yours.
 
 The robot's own motor ranges are separate, and recorded with
-`python main.py --recalibrate`.
+`python robot.py --recalibrate`.
 
 ## Licence
 

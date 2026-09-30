@@ -161,7 +161,7 @@ class WebUI:
         in-flight handlers, and an attached browser always has two: a
         websocket parked in `async for`, and an MJPEG response that only ends
         when the client goes away. Closing those first, and capping what is
-        left, is the difference between exiting now and run_teleop.py giving
+        left, is the difference between exiting now and main.py giving
         up on this process and killing it -- which is what puts a
         ConnectionResetError traceback in the robot bridge's console.
         """
@@ -224,7 +224,7 @@ class WebUI:
 
         Queues the same command the page's Quit button sends, so the loop
         closes its cameras and its robot link on the way out instead of
-        being killed mid-frame. See run_teleop.py.
+        being killed mid-frame. See main.py.
         """
         from aiohttp import web
 

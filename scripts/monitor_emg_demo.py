@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
 """
+The live EMG monitor running on synthetic data, with no hardware.
+
+Earlier version of monitor_emg.py: the same raw + envelope window, but its
+acquisition thread generates simulated bursts instead of reading a serial
+port, so the UI and the filtering can be worked on away from the rig. It
+cannot record a real subject -- use monitor_emg.py for that.
+
+Usage:
+    python scripts/monitor_emg_demo.py
+
 Created on Tue Aug 11 00:21:59 2026
 
 @author: AS

@@ -106,7 +106,7 @@
   .hint { color: var(--muted); font-size: 12px; }
 
   /* Jog. The console keys these mirror only reach a window that is behind
-     the browser, so under run_teleop.py this is the only way to drive it. */
+     the browser, so under main.py this is the only way to drive it. */
   .jog { display: grid; grid-template-columns: 1fr auto auto auto; gap: 7px 8px; align-items: center; }
   .jog .jn { font-size: 13px; color: var(--muted); }
   .jog .jp { font: 600 13px ui-monospace, Menlo, Consolas, monospace; text-align: right; min-width: 60px; }
@@ -433,7 +433,7 @@ function renderAlign(robot, metrics, link) {
 
   if (!robot) {
     // Connected but silent is a different situation from not connected:
-    // main.py only starts sending state once its control loop is running.
+    // robot.py only starts sending state once its control loop is running.
     box.innerHTML = link.connected
       ? `<p class="hint">Connected — waiting for the robot's first state frame…</p>`
       : `<p class="hint">No robot connected. Press <b>Connect robot</b> to link to the control bridge.</p>`;
@@ -489,7 +489,7 @@ function renderAlign(robot, metrics, link) {
   $("align-hint").hidden = !rows.length;
 }
 
-// Same order and the same keys as main.py's console jog, so the habit
+// Same order and the same keys as robot.py's console jog, so the habit
 // carries between the two. The console keys still work when it has focus.
 // Display order and short labels for the range card, matching METRICS in
 // tracker.py. Kept here rather than derived from state.metrics because the

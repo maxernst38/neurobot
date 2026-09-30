@@ -1,5 +1,19 @@
 # -*- coding: utf-8 -*-
 """
+Live EMG monitor: raw signal and RMS envelope, read from a serial port.
+
+A PyQt6 window that streams from the OpenScope/MyoWare board, band-passes
+and rectifies the signal on the fly, plots raw and envelope together, and
+saves what it has buffered to a CSV. The port and baud rate are set in the
+window, so nothing here needs arguments.
+
+Fixed-length captures for the data/ set are made with record_emg.py
+instead; monitor_emg_demo.py is this same window driven by synthetic data,
+for working on it with no hardware attached.
+
+Usage:
+    python scripts/monitor_emg.py
+
 Created on Tue Aug 11 01:00:49 2026
 
 @author: AS

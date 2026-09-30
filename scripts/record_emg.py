@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
 """
+Record a fixed-length EMG burst from the Arduino and plot it.
+
+Reads DURATION seconds of samples off the serial port, writes them to
+EMG_5sec.csv in the current directory, and shows the trace. This is the
+capture tool the CSVs under data/emg/ were produced with; the sampling
+settings below are edited in place rather than passed as arguments.
+
+For a live view instead of a fixed capture, see monitor_emg.py.
+
+Usage:
+    python scripts/record_emg.py
+
 Created on Sun Jul 26 13:25:03 2026
 
 @author: admin
@@ -8,7 +20,6 @@ Created on Sun Jul 26 13:25:03 2026
 import serial
 import pandas as pd
 import time
-import pandas as pd
 import matplotlib.pyplot as plt
 
 PORT = "COM3"

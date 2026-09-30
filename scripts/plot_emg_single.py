@@ -19,7 +19,7 @@ RMS_WINDOW_S = 0.08  # sliding window used to compute the RMS envelope
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python graph_emg_single.py <csv_file>")
+        print("Usage: python scripts/plot_emg_single.py <csv_file>")
         sys.exit(1)
 
     csv_path = sys.argv[1]
